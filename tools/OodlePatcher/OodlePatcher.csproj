@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Referenced by fpkg.csproj, which only wants the managed dll; an apphost would just
+         be an extra unused binary in every distribution zip. The condition is required:
+         SelfContained flows down from the standalone publish, and a self-contained build
+         must have an apphost (NETSDK1067). -->
+    <UseAppHost Condition="'$(SelfContained)' != 'true'">false</UseAppHost>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>oodle-patcher</AssemblyName>
+    <RootNamespace>OodlePatcher</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="dnlib" Version="4.4.0" />
+  </ItemGroup>
+</Project>

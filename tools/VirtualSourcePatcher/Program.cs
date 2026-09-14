@@ -1,0 +1,4 @@
+// Thin process entry point. The patch lives in VirtualSourcePatcherProgram so that
+// `fpkg patch` can run it in-process, without the SDK the distribution zip deliberately
+// does not need.
+return VirtualSourcePatcher.VirtualSourcePatcherProgram.Run(args);

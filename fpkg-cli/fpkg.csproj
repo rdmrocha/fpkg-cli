@@ -1,0 +1,101 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>fpkg</AssemblyName>
+    <RootNamespace>Fpkg.Cli</RootNamespace>
+    <!-- Single source of truth for the CLI's version: ../VERSION, read by publish.sh too so
+         the zip name and `fpkg version` can never disagree. The number tracks the
+         LibProsperoPkg release this CLI is built and tested against (0.6.4), which is what a
+         user comparing the two folders expects to see. -->
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../VERSION').Trim())</Version>
+    <!-- No RuntimeIdentifier here: the framework-dependent publish (the portable zip) is
+         plain IL and runs on macOS or Linux, arm64 or x64, with the .NET 10 runtime. The
+         RID lives only in the publish command for the standalone build (see publish.sh),
+         which is inherently per-RID. -->
+    <SelfContained>false</SelfContained>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Referenced by the launcher only through "dotnet fpkg.dll" for a framework-dependent
+         build (see the "fpkg" launcher's self-contained detection); an apphost there would
+         just be an extra, host-specific binary bundled uselessly into an otherwise portable
+         zip. The condition is required: SelfContained flows down from the standalone
+         publish, and a self-contained build must have an apphost (NETSDK1067). -->
+    <UseAppHost Condition="'$(SelfContained)' != 'true'">false</UseAppHost>
+    <!-- LibProsperoPkg is net9.0; loading it from net10.0 is fine. -->
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+
+  <!-- The prebuilt assemblies live one level up, alongside the Windows GUI.
+       Override with -p:LibDir=<path>/ to build against another release. -->
+  <PropertyGroup>
+    <LibDir Condition="'$(LibDir)' == ''">../</LibDir>
+    <!-- HintPath must win. Without this, any stray LibProsperoPkg.dll under the project
+         directory (e.g. a previous -o output folder) silently outranks LibDir. -->
+    <AssemblySearchPaths>{HintPathFromItem};{TargetFrameworkDirectory};{RawFileName}</AssemblySearchPaths>
+    <LibXmlPath>$([System.IO.Path]::Combine('$(MSBuildThisFileDirectory)', '$(LibDir)', 'LibProsperoPkg.xml'))</LibXmlPath>
+    <!-- 0.2 added TemporaryDirectory, the Kraken knobs and CancellationToken.
+         Feature-detect them so an older release still compiles. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.KrakenCompressionLevel'))">$(DefineConstants);LIB_HAS_BUILD_TUNING</DefineConstants>
+    <!-- ProsperoPublisherImageMode postdates the Aug 2026 upstream tree. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('T:LibProsperoPkg.ProsperoPublisherImageMode'))">$(DefineConstants);LIB_HAS_IMAGE_MODE</DefineConstants>
+    <!-- PlayGoChunkCount also postdates the Aug 2026 upstream tree. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.PlayGoChunkCount'))">$(DefineConstants);LIB_HAS_PLAYGO_COUNT</DefineConstants>
+    <!-- KrakenBackend / PublishingToolsLibraryPath arrived in 0.4. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.KrakenBackend'))">$(DefineConstants);LIB_HAS_KRAKEN_BACKEND</DefineConstants>
+    <!-- PfsCompressionFormat / EntitlementKey / SourceMode arrived in 0.6.2. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.PfsCompressionFormat'))">$(DefineConstants);LIB_HAS_062_OPTIONS</DefineConstants>
+    <!-- ProsperoSdkVersions / SdkVersionOverride arrived in 0.5. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('T:LibProsperoPkg.Content.ProsperoSdkVersions'))">$(DefineConstants);LIB_HAS_SDK_VERSIONS</DefineConstants>
+    <!-- ProsperoSha3 backend diagnostics: only in trees carrying the acceleration patch. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoSha3.AccelerationAdvice'))">$(DefineConstants);LIB_HAS_SHA3_DIAGNOSTICS</DefineConstants>
+    <!-- FpkgVirtualSource is now a ProjectReference (below) and therefore always present:
+         the CLI ships it in fpkg-tools/bin/ so that `fpkg patch` can apply the ffpfsc leg
+         with nothing but the zip. It used to be feature-detected off a LibDir copy that only
+         existed after ./patch.sh had run, which is exactly the compile-time/run-time skew the
+         VirtualSourcePatchLoaded() gate in Program.cs exists to catch. The constant is kept
+         (rather than the #if blocks deleted) because that gate is still the load-bearing
+         check: shipping the shim says nothing about whether the LOADED LibProsperoPkg carries
+         the ffpfsc leg. -->
+    <DefineConstants>$(DefineConstants);HAS_VIRTUAL_SOURCE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="LibProsperoPkg">
+      <HintPath>$(LibDir)LibProsperoPkg.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Magick.NET-Q8-AnyCPU">
+      <HintPath>$(LibDir)Magick.NET-Q8-AnyCPU.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Magick.NET.Core">
+      <HintPath>$(LibDir)Magick.NET.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BCnEncoder">
+      <HintPath>$(LibDir)BCnEncoder.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="CommunityToolkit.HighPerformance">
+      <HintPath>$(LibDir)CommunityToolkit.HighPerformance.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Everything the distribution needs at run time, built from source and copied into the
+       output so that the zip is self-sufficient:
+         FpkgVirtualSource        the ffpfsc shim the patched LibProsperoPkg calls into
+         PprPfsKrakenTool         the Oodle backend the patched encoder calls into
+         OodlePatcher /           the two dnlib patchers, invoked IN-PROCESS by `fpkg patch`
+         VirtualSourcePatcher     (dotnet run is not available to a zip with no SDK)
+       LibDir flows down, so all four bind to the same release folder this CLI does. -->
+  <ItemGroup>
+    <ProjectReference Include="../FpkgVirtualSource/FpkgVirtualSource.csproj" />
+    <ProjectReference Include="../PprPfsKrakenTool/PprPfsKrakenTool.csproj" />
+    <ProjectReference Include="../tools/OodlePatcher/OodlePatcher.csproj" />
+    <ProjectReference Include="../tools/VirtualSourcePatcher/VirtualSourcePatcher.csproj" />
+  </ItemGroup>
+
+</Project>

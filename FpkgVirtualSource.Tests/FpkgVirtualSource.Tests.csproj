@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LibDir Condition="'$(LibDir)' == ''">../</LibDir>
+    <AssemblySearchPaths>{HintPathFromItem};{TargetFrameworkDirectory};{RawFileName}</AssemblySearchPaths>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- PatchStamp decides which LibProsperoPkg the CLI loads and whether the ffpfsc leg is in
+         it, which is a correctness decision (see PatchStampTests). It is compiled in rather than
+         referenced: fpkg.csproj is an Exe whose LibraryResolver module initializer installs an
+         assembly-resolving hook, and referencing it would run that hook inside the test host
+         alongside TestResolver's. The file is self-contained and touches nothing but the
+         filesystem, so linking it keeps the tests honest without that entanglement. -->
+    <Compile Include="../fpkg-cli/PatchStamp.cs" Link="PatchStamp.cs" />
+    <ProjectReference Include="../FpkgVirtualSource/FpkgVirtualSource.csproj" />
+    <!-- Not transitive: FpkgVirtualSource's LibProsperoPkg reference has Private=false, which
+         MSBuild does not propagate across ProjectReference. ByteSource implements IMemoryReader
+         here, so the test assembly needs its own compile-time reference. -->
+    <Reference Include="LibProsperoPkg">
+      <HintPath>$(LibDir)LibProsperoPkg.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

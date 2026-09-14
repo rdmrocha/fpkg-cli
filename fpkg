@@ -1,0 +1,62 @@
+#!/bin/sh
+# Cross-platform CLI for LibProsperoPkg (macOS, Linux; arm64 or x64).
+#
+# Unzip this script and fpkg-tools/ into a release folder (the one holding
+# LibProsperoPkg.dll) and run ./fpkg. The Windows GUI is WinForms and cannot run
+# here; this drives the same library directly.
+#
+#   <release folder>/
+#     fpkg              this script
+#     fpkg-tools/bin/   the CLI and everything it ships (no .NET SDK needed)
+#     fpkg-tools/native/  where you drop your own RAD Oodle library, if you have one
+#
+# fpkg-tools/bin/ ships prebuilt, so nothing but the .NET 10 runtime is required —
+# and not even that for the --standalone build. If it is absent and the CLI sources
+# are present (an in-repo checkout), it is built on first run and the SDK is required.
+set -e
+
+here=$(cd "$(dirname "$0")" && pwd)
+tools="$here/fpkg-tools"
+bin="$tools/bin"
+src="$here/fpkg-cli"
+
+die() { printf 'error: %s\n' "$1" >&2; shift; for l in "$@"; do printf '  %s\n' "$l" >&2; done; exit 1; }
+
+[ -f "$here/LibProsperoPkg.dll" ] || die "LibProsperoPkg.dll not found in $here" \
+    "Place fpkg and fpkg-tools/ inside the release folder, alongside" \
+    "LibProsperoPkg.dll and the other release binaries."
+
+# Self-contained build: carries its own runtime, needs nothing installed.
+if [ -f "$bin/fpkg" ] && [ -f "$bin/System.Private.CoreLib.dll" ]; then
+    exec "$bin/fpkg" "$@"
+fi
+
+if [ -f "$bin/fpkg.dll" ]; then
+    command -v dotnet >/dev/null 2>&1 || die "the .NET 10 runtime is not installed." \
+        "Install it with Homebrew:" \
+        "    brew install dotnet" \
+        "If you do not have Homebrew: https://brew.sh"
+    exec dotnet "$bin/fpkg.dll" "$@"
+fi
+
+[ -d "$src" ] || die "fpkg-tools/bin/ not found next to this script." \
+    "Unzip the distribution so that fpkg and fpkg-tools/ sit side by side."
+
+# No prebuilt binary, but the sources are here: build from them, which needs the SDK.
+command -v dotnet >/dev/null 2>&1 || die "the .NET SDK is not installed." \
+    "Install it with Homebrew:" \
+    "    brew install dotnet" \
+    "If you do not have Homebrew: https://brew.sh"
+
+if ! dotnet --list-sdks 2>/dev/null | grep -q '^1[0-9]\.'; then
+    die ".NET SDK 10 or newer is required to build the CLI." \
+        "Installed SDKs:" \
+        "$(dotnet --list-sdks 2>/dev/null | sed 's/^/    /' || echo '    (none)')" \
+        "Install a current SDK with:" \
+        "    brew install dotnet"
+fi
+
+printf 'Building fpkg (first run)...\n' >&2
+mkdir -p "$bin"
+dotnet build "$src/fpkg.csproj" -c Release -v q --nologo -o "$bin" >/dev/null
+exec dotnet "$bin/fpkg.dll" "$@"
