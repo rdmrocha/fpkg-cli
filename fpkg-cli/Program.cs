@@ -1253,8 +1253,8 @@ internal static class Program
     /// but the restore sits in the ELSE of a TryGetValue: it only fires when the PNG is ABSENT,
     /// and only for pic1.png and pic2.png. A present-but-corrupt file is read with
     /// File.ReadAllBytes and packed verbatim, unchecked, in every release through 0.6.7.
-    /// Real example: a Control dump whose pic2.png is 532 bytes of high-entropy data with no
-    /// PNG signature at all, sitting next to a perfectly good pic2.dds.
+    /// Seen in the wild: a dump whose pic2.png is 532 bytes of high-entropy data with no PNG
+    /// signature at all, sitting next to a perfectly good pic2.dds.
     ///
     /// So the fix is to make the file absent. That is enough for pic1/pic2, which the library
     /// then rebuilds from their DDS. icon0.png and pic0.png have a DDS sibling in DdsMedia but

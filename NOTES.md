@@ -136,7 +136,7 @@ So if the dump carries them, **the dump's copies win and the generated ones are 
 
 The source folder must contain `sce_sys/`; a minimal `param.json` is generated if absent (pass `--no-param-json` to opt out). `--format` picks the container: `DebugImage` (default, the only installable form), `MetadataContainer` (CNT, metadata only), or `RetailImage` (needs a trusted finalization provider the CLI does not supply).
 
-## Verified on this machine
+## Measured on this machine
 
 Apple M2 Pro, macOS 15, .NET 10.0.11 (Homebrew), arm64 — no Rosetta, no Wine:
 
@@ -207,7 +207,7 @@ Both bugs are in 0.6.4. They are data-dependent, which is why they shipped.
 
 These fields are **BCD**, not plain hex: `0x1270000000000000` is firmware 12.70, not 18.x. The 0.6.4 clamp constant `648518346341351424` is `0x0900…`, i.e. 9.00.
 
-The 0.6.6 shape was actively harmful on a backported dump. Measured on a real one (Starfield PPSA24884 v1.0.0002, `param.json` requiring 12.70 while its `eboot.bin` process-param had been patched down to SDK 10.00.00.40): 0.6.4 with SDK 10 selected produced a package requiring firmware 10.00; 0.6.6 produced 12.70 *regardless of the SDK chosen*, because the floor could only ever raise it. 0.6.7 decouples them entirely — the SDK no longer moves the firmware requirement in either direction, and nothing in the library can lower it below what `param.json` declares.
+The 0.6.6 shape was actively harmful on a backported dump. Measured on one whose `param.json` required firmware 12.70 while its `eboot.bin` process-param had been patched down to SDK 10.00.00.40: 0.6.4 with SDK 10 selected produced a package requiring firmware 10.00; 0.6.6 produced 12.70 *regardless of the SDK chosen*, because the floor could only ever raise it. 0.6.7 decouples them entirely — the SDK no longer moves the firmware requirement in either direction, and nothing in the library can lower it below what `param.json` declares.
 
 The GUI's SDK combo went index 1 (SDK 1.00) -> Auto in 0.6.6 -> back to index 1 in 0.6.7. `--sdk-version` defaults to `1` to match; `--sdk-version keep` leaves the source's own values alone.
 
@@ -224,11 +224,11 @@ The GUI's SDK combo went index 1 (SDK 1.00) -> Auto in 0.6.6 -> back to index 1 
           $"The PlayGo main extent has {blocks} blocks and cannot be split into {chunkCount} non-empty chunks.");
   ```
 
-  0.6.6 deleted it; **0.6.7 did not restore it**. Verified on 0.6.7: a 3 MB source (45 blocks of 64 KiB) with the new default of 100 chunks builds clean and silently emits 55 zero-length chunk extents. `PlayGoChunkCountProblem()` re-checks this before the build, since the CLI knows the source size.
+  0.6.6 deleted it; **0.6.7 did not restore it**. On 0.6.7 a 3 MB source (45 blocks of 64 KiB) with the new default of 100 chunks builds clean and silently emits 55 zero-length chunk extents. `PlayGoChunkCountProblem()` re-checks this before the build, since the CLI knows the source size.
 
 ### sce_sys PNG repair
 
-Not an upstream feature — ours. 0.6.6 added "restoration of full-screen PNG images if they are missing from the dump", but the restore sits in the `else` of a `TryGetValue`: it fires only when the PNG is **absent**, and only for `pic1.png` and `pic2.png`. A present-but-corrupt file is read with `File.ReadAllBytes` and packed unchecked, in every release through 0.6.7. A Control dump (PPSA01949 v1.0.0005) has a `pic2.png` that is 532 bytes of high-entropy data with no PNG signature, beside a valid `pic2.dds`. That dump also has `origin-param.json` containing a PNG, `target-param.json` byte-identical to `pic2.dds`, and `playgo-ficm.dat` byte-identical to `param.json` — all three already caught by the quarantine's name globs, which is a useful independent check on that list.
+Not an upstream feature — ours. 0.6.6 added "restoration of full-screen PNG images if they are missing from the dump", but the restore sits in the `else` of a `TryGetValue`: it fires only when the PNG is **absent**, and only for `pic1.png` and `pic2.png`. A present-but-corrupt file is read with `File.ReadAllBytes` and packed unchecked, in every release through 0.6.7. One dump examined here has a `pic2.png` that is 532 bytes of high-entropy data with no PNG signature, beside a valid `pic2.dds`. The same dump has `origin-param.json` containing a PNG, `target-param.json` byte-identical to `pic2.dds`, and `playgo-ficm.dat` byte-identical to `param.json` — all three already caught by the quarantine's name globs, which is a useful independent check on that list.
 
 The repair is done entirely in our own code, including for pic1/pic2, because `ProsperoDdsEncoder.DecodeDdsToPng` decodes the DDS with BCnEncoder (managed) but encodes the PNG with **Magick.NET**, whose native half ships only as `runtimes/win-x64/native/Magick.Native-Q8-x64.dll`. Off Windows its type initializer throws, so the library's own restore path turns a *missing* pic1/pic2 into a failed build rather than a restored one. `PngCodec` therefore does the encoding (zlib plus three chunks) and `MediaRepair` fills in missing pic1/pic2 as well as corrupt ones, so the library never reaches that call.
 
@@ -255,7 +255,7 @@ It deliberately **keeps** `license.dat`/`license.info` and `playgo-chunk.dat`, b
 - `c_date` from `param.json -> pubtools.creationDate`
 - chunk and scenario labels are placeholders (`"Chunk #N"`, `"Scenario #N"`)
 
-Round-tripped here on a package built with 0.6.7: entitlement key `000102030405060708090A0B0C0D0E0F` recovered exactly, rebuild from the template verified clean (`VerifyPackageQuick` and `VerifyPackageFull`, 0 issues). Note that `ProsperoPackageBuilder.Build` does **not** read the GP5's own `content_id`, `passcode` or `entitlement_key` — passing only `SourceMode=Gp5Project` throws `ArgumentException: Content ID is not in the format …`. The host lifts them; the GUI does this too.
+Round-tripped on a package built with 0.6.7: entitlement key `000102030405060708090A0B0C0D0E0F` recovered exactly, and a rebuild from the template reports 0 issues from both `VerifyPackageQuick` and `VerifyPackageFull`. Note that `ProsperoPackageBuilder.Build` does **not** read the GP5's own `content_id`, `passcode` or `entitlement_key` — passing only `SourceMode=Gp5Project` throws `ArgumentException: Content ID is not in the format …`. The host lifts them; the GUI does this too.
 
 ### Emulator-ish files in a dump
 
@@ -267,13 +267,26 @@ Exactly three filenames are special, all in `BuildInnerTree` after the source wa
 | `fakelib/libSceAmpr.sprx` | **dropped**, silently | same |
 | `fakelib/libScePlayGo.sprx` | **dropped**, silently | same |
 
-`FilterFakeLibraryDirectory` also normalises the directory name to lowercase `fakelib`. **`dlc_emu` has no handling whatsoever** — no string match anywhere in the library or the GUI — so it rides into the inner PFS verbatim. Confirmed by building with decoys: `ampr/ampr_data.bin`, `ampr_emu.cfg`, `fakelib/libSceSomethingElse.sprx` and both `dlc_emu/*` files all survived; the three above did not. The `RemoveAll` is on the root dir only, so a nested `sub/ampr_emu.index` would survive.
+`FilterFakeLibraryDirectory` also normalises the directory name to lowercase `fakelib`. **`dlc_emu` has no handling whatsoever** — no string match anywhere in the library or the GUI — so it rides into the inner PFS verbatim. Building with decoys shows `ampr/ampr_data.bin`, `ampr_emu.cfg`, `fakelib/libSceSomethingElse.sprx` and both `dlc_emu/*` files surviving; the three above do not. The `RemoveAll` is on the root dir only, so a nested `sub/ampr_emu.index` would survive.
 
 Both filters run *after* the `Populate` our TreeOverlay patch hooks, so container (`.ffpfsc`) builds get them too.
 
 ### Our patcher needed no change
 
-All seven IL sites resolve on 0.6.7 with the same ordinals as 0.6.6 (`Populate|39_17`, `IsLooseElf|39_34`, `IsSelf|39_35`, `GetApplicationSceVersion|39_33`), and site 4 reports identically on 0.6.4, 0.6.6 and 0.6.7. Pattern-based lookup earned its keep: the ordinals moved 0.6.4 -> 0.6.6 and held 0.6.6 -> 0.6.7.
+The original seven IL sites resolve on 0.6.7 with the same ordinals as 0.6.6 (`Populate|39_17`, `IsLooseElf|39_34`, `IsSelf|39_35`, `GetApplicationSceVersion|39_33`), and site 4 reports identically on 0.6.4, 0.6.6 and 0.6.7. Pattern-based lookup earned its keep: the ordinals moved 0.6.4 -> 0.6.6 and held 0.6.6 -> 0.6.7.
+
+**Two more were needed, and they are not a 0.6.7 change.** Giving `--sdk-version` a default (to match the GUI) made `ConvertLooseElfExecutables` run on every build, and it is a no-op without an SDK override — so a whole code path that had never executed on a container source suddenly did. `g__BuildSdkOverriddenSelf` opens the ORIGINAL executable by `SourcePath` twice: once through `g__OpenExecutableProbe` to locate the `.sceversion` offset, and once in the Write delegate it hands to the replacement `FSFile`, to copy everything before that offset. For a container both are the `ffpfsc:<handle>:/...` scheme, so the build died with:
+
+```
+Source tree scan: complete. 0 files, 0 bytes.
+error: Could not find a part of the path '.../ffpfsc:724dc787:/Media/Modules/Il2cppUserAssemblies.prx'.
+```
+
+Site 8 is `VirtualiseProbe` applied to `BuildSdkOverriddenSelf` — the existing rewrite, unchanged, because `OpenExecutableProbe` is a single chokepoint that the other three probe sites already went through. Site 9 is the Write delegate's `BuildFileIO.Open`, which has the same six-argument `(String, FileMode, FileAccess, FileShare, Int32, FileOptions)` shape as the `newobj FileStream` that site 2 already rewrites, so both now share `RedirectSixArgOpen`.
+
+This was invisible until now because **`--sdk-version` had no default and the container fixtures contained no executables**. The acceptance fixture is a tree of ordinary data files; `ConvertLooseElfExecutables` never had anything to convert. Any container fixture used to check this path has to carry at least one `.prx`, `.self`, `.elf` or `eboot.bin`, and the build has to set an SDK.
+
+Reverting sites 8 and 9 reproduces the error above exactly. With them, a container carrying executables and the equivalent folder produce byte-identical inner files, and `sce_module/libc.prx` is correctly restamped from `.sceversion` `0x0500003300000001` (SDK 5.00.00.33) to `0x0100005000000001` (canonical SDK 1.00.00.50).
 
 ## Upstream 0.6.2
 
@@ -304,7 +317,7 @@ Through 0.6.5 the library only ever *reads* the field. `BuildContainer` stamps `
 
 ### 0.6.4 — the ~50% temp saving is real, and it matters most on exFAT
 
-Verified by tracing every file in `--temp-dir` through an identical 679 MB build:
+Traced every file in `--temp-dir` through an identical 679 MB build:
 
 | | 0.6.2 | 0.6.4 |
 |---|---|---|
@@ -514,7 +527,7 @@ Measured and rejected:
 - **SIMD `CommonPrefixLength`** — it is already 8-byte XOR + `TrailingZeroCount`.
 - **The encoder's 19 mutable `internal static` knobs**, all reachable by reflection without patching anything (`UseFaef0`, `UseCtmfFinder`, `UseSuffixTrieFinder`, …). Swept every one: best is 6%, and `UseSuffixTrieFinder=false` is slower *and* bigger.
 
-The one patch that worked — drop the two extra greedy seeds and let the DP win whenever it emits validly — is **−19% time for +0.09–0.26% size**, verified with `VerifyBlocks` (every block decoded and byte-compared). Still not enough, because the baseline it improves is so far from level 6:
+The one patch that worked — drop the two extra greedy seeds and let the DP win whenever it emits validly — is **−19% time for +0.09–0.26% size**, checked with `VerifyBlocks` (every block decoded and byte-compared). Still not enough, because the baseline it improves is so far from level 6:
 
 | 15.60 GiB real packfile | wall clock | output | L7 gain kept |
 |---|---|---|---|
@@ -725,13 +738,13 @@ cd ~/Developer/fpkg-gui
 dotnet test FpkgVirtualSource.Tests -v n --filter ContainerAndFolderBuildsShareEveryInnerFileByteForByte
 ```
 
-A run that reports the test as *skipped* has verified nothing.
+A run that reports the test as *skipped* has checked nothing.
 
 **History, since it's instructive.** This test went through three rounds before it passed cleanly, and each round found something real:
 
 1. **First pass** (before the fix above): `sce_sys/keystone` (crypto material), `sce_sys/pfs-version.dat` (structural) and `sce_sys/about/right.sprx` were silently missing from every container build — present in the container, staged correctly to disk, and then never added to the tree at all, because `TreeOverlay.Populate` returning `true` skips the library's own filesystem walk of that directory entirely (see above). The package still verified cleanly; only a console would have noticed. **Critical**, fixed by walking the staged `sce_sys/` for real.
 2. **Second pass** (after that fix): the same walk, being unconditional, also added `sce_sys/ext_info.dat`, which LibProsperoPkg's own folder walk excludes from generic inner content — but only a top-level `sce_sys/ext_info.dat`, by a narrow, specific rule (skip `ext_info.dat` when its parent directory is named `sce_sys` and that directory is a direct child of the tree root — an `ext_info.dat` anywhere else is kept). `TreeOverlay.AddRealTree` now reproduces that exact rule rather than guessing at one.
-3. **Third pass, after both fixes**: the container and folder builds of this fixture are **verified byte-for-byte identical**:
+3. **Third pass, after both fixes**: the container and folder builds of this fixture come out **byte-for-byte identical**:
    ```
    folder:    be40425d06bfecd2cf53e241703fad17a97e7df5c2b94cbd881d344c49b17eb1, 651,566,990 bytes
    container: be40425d06bfecd2cf53e241703fad17a97e7df5c2b94cbd881d344c49b17eb1, 651,566,990 bytes  (cmp: identical)

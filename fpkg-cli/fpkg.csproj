@@ -71,17 +71,17 @@
          the ffpfsc leg. -->
     <DefineConstants>$(DefineConstants);HAS_VIRTUAL_SOURCE</DefineConstants>
   </PropertyGroup>
+  <!-- Every LIB_HAS_* probe below reads LibProsperoPkg.xml. When it is absent the conditions
+       all evaluate false and the CLI silently compiles down to its oldest supported shape, which
+       surfaces as a pile of CS0103s about variables that only exist inside those #ifs. Fail here
+       with the actual cause instead. -->
+  <Target Name="RequireLibXml" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(LibXmlPath)')"
+           Text="LibProsperoPkg.xml not found at $(LibXmlPath). It sits beside LibProsperoPkg.dll in the release zip and is what the feature probes read; without it the CLI compiles as if built against the oldest supported release." />
+  </Target>
   <ItemGroup>
     <Reference Include="LibProsperoPkg">
       <HintPath>$(LibDir)LibProsperoPkg.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Magick.NET-Q8-AnyCPU">
-      <HintPath>$(LibDir)Magick.NET-Q8-AnyCPU.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="Magick.NET.Core">
-      <HintPath>$(LibDir)Magick.NET.Core.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="BCnEncoder">

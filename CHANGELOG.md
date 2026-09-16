@@ -1,5 +1,13 @@
 # Changelog
 
+## fpkg 0.6.7-fix1
+
+Fixes one regression in 0.6.7. Re-run `./fpkg patch` after updating — this release changes what the patch does.
+
+**Container sources failed when an SDK was stamped.** 0.6.7 gave `--sdk-version` a default of `1`, which made the library rewrite the `.sceversion` trailer in every executable on every build. That path opens the original executable by filename, and a `.ffpfsc` source has no filename to open, so any container holding a `.prx`, `.self`, `.elf` or `eboot.bin` died with `Could not find a part of the path '...ffpfsc:<handle>:/...'`. Two further IL patch sites cover it; `fpkg patch` now reports nine instead of seven. Folder sources were never affected, and neither were containers built with `--sdk-version keep`.
+
+A container carrying executables and the equivalent folder now produce byte-identical inner files, with the SDK correctly restamped.
+
 ## fpkg 0.6.7
 
 Tracks LibProsperoPkg 0.6.7.
@@ -37,7 +45,7 @@ A command-line front end for **LibProsperoPkg by Drakmor**, so PS5 packages can 
 `fpkg build` with the options the GUI exposes: `--mode`, `--image-mode`, `--format`, `--content-id`, `--version`, `--title`, `--title-id`, `--passcode`, `--playgo`, `--sdk-version`, `--entitlement-key`, `--gp5`, `--pfs-format`, `--compress`, `--temp-dir`, plus `--no-deterministic`, `--no-param-json`, `--no-verify`, `--no-coalescing`, `--no-relocation-align` and `--shuffle-analysis`. Content id, version and title are read from `sce_sys/param.json` when not given, and the finished package is verified structurally unless you skip it.
 
 ### Build straight from a container
-`--source` accepts a `.ffpfsc` or `.exfat` image as well as a folder. The container is read in place — no unpacking, no temporary copy of the tree. Verified to produce byte-identical output to building from the equivalent extracted folder.
+`--source` accepts a `.ffpfsc` or `.exfat` image as well as a folder. The container is read in place — no unpacking, no temporary copy of the tree. It produces byte-identical output to building from the equivalent extracted folder.
 
 ### Native Oodle encoder
 `--kraken-backend Oodle` binds a RAD Oodle library you supply yourself (2.9.16) for roughly 3× faster builds. Nothing is compiled for it and nothing is bundled. `Auto` picks Oodle when it is available and the managed BuiltIn encoder when it is not, and says which it chose.

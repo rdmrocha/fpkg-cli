@@ -121,38 +121,89 @@ internal static class Rewrites
             {
                 if (body[i].OpCode != OpCodes.Newobj || body[i].Operand is not IMethod ctorRef) continue;
                 if (ctorRef.DeclaringType.FullName != "System.IO.FileStream") continue;
-
-                Sites.Expect(ctorRef.MethodSig.Params.Count == 6,
-                    $"expected the 6-argument FileStream constructor, got {ctorRef.MethodSig.Params.Count}");
-                Sites.Expect(ctorRef.MethodSig.Params[0].FullName == "System.String",
-                    "the FileStream constructor's first argument is not the path");
-                Sites.Expect(i >= 5, "not enough instructions before newobj FileStream");
-
-                // Nothing may jump into the middle of the argument run, and no exception-handler
-                // boundary may sit on it; either would make the disposal below break control flow.
-                ExpectNotTargeted(method, body, i - 5, 6,
-                    "the newobj FileStream argument run");
-
-                for (int back = 1; back <= 5; back++)
-                {
-                    var arg = body[i - back];
-                    Sites.Expect(IsSingleValuePush(arg.OpCode),
-                        $"argument {back} before newobj FileStream is {arg.OpCode}, which is not a " +
-                        "simple single-value push; re-derive this rewrite against the current IL");
-                    arg.OpCode = OpCodes.Nop; arg.Operand = null;
-                }
-
-                // Mutated in place rather than replaced, so nothing that referenced this
-                // instruction object (a branch, a handler bound) is left pointing at an orphan.
-                body[i].OpCode = OpCodes.Call;
-                body[i].Operand = shim.OpenOrFile;
-                WidenFileStreamLocal(method, body, i);
+                RedirectSixArgOpen(method, body, i, ctorRef, shim, "newobj FileStream");
                 redirected++;
             }
             method.Body.UpdateInstructionOffsets();
         }
         Sites.Expect(redirected == 1,
             $"expected exactly one FileStream construction in FSFile to redirect, found {redirected}");
+    }
+
+    /// <summary>
+    /// Site 9. The Write delegate g__BuildSdkOverriddenSelf hands to its replacement FSFile opens
+    /// the ORIGINAL executable by path, to copy everything up to the .sceversion patch offset:
+    ///
+    ///     using FileStream source = BuildFileIO.Open(sourcePath, Open, Read, Read, 1 MiB, Sequential);
+    ///     CopyPrefix(source, destination, patchOffset);
+    ///
+    /// For a container source that path is the "ffpfsc:&lt;handle&gt;:/..." scheme, so the open throws.
+    /// It is reached only when an SDK override is set — ConvertLooseElfExecutables is a no-op
+    /// without one — which is why it stayed invisible until --sdk-version gained a default.
+    ///
+    /// Six pushed arguments and a String first parameter, exactly like the FSFile constructor, so
+    /// both go through the same rewrite. Inert for folder sources: OpenOrFile falls back to a
+    /// plain FileStream for real paths.
+    /// </summary>
+    internal static void VirtualiseSelfPatchCopy(MethodDef lambda, Sites.Shim shim)
+    {
+        var body = lambda.Body.Instructions;
+
+        int callIndex = -1;
+        IMethod? opened = null;
+        for (int i = 0; i < body.Count; i++)
+        {
+            if (body[i].OpCode != OpCodes.Call || body[i].Operand is not IMethod m) continue;
+            if (m.FullName.IndexOf("BuildFileIO::Open", StringComparison.Ordinal) < 0) continue;
+            Sites.Expect(callIndex < 0, $"{lambda.Name}: more than one BuildFileIO.Open call");
+            callIndex = i;
+            opened = m;
+        }
+        Sites.Expect(callIndex >= 0, $"{lambda.Name}: no BuildFileIO.Open call found");
+
+        RedirectSixArgOpen(lambda, body, callIndex, opened!, shim, "BuildFileIO.Open");
+        lambda.Body.UpdateInstructionOffsets();
+    }
+
+    /// <summary>
+    /// Rewrites a six-argument "open this path" call — `newobj FileStream(...)` or
+    /// `BuildFileIO.Open(...)`, which share a signature — into VirtualSource.OpenOrFile(string).
+    /// The five arguments after the path are pushed BEFORE the call, so they are nopped in place
+    /// rather than removed: mutating keeps every branch and handler bound pointing at a live
+    /// instruction instead of an orphan.
+    /// </summary>
+    private static void RedirectSixArgOpen(
+        MethodDef method, IList<Instruction> body, int callIndex, IMethod target,
+        Sites.Shim shim, string what)
+    {
+        Sites.Expect(target.MethodSig.Params.Count == 6,
+            $"{method.Name}: expected the 6-argument form of {what}, got {target.MethodSig.Params.Count}");
+        Sites.Expect(target.MethodSig.Params[0].FullName == "System.String",
+            $"{method.Name}: {what}'s first argument is not the path");
+        // Only meaningful for `call`. A constructor's signature always has HasThis, but `newobj`
+        // allocates the receiver itself rather than taking one off the stack, so the six pushed
+        // arguments are the whole story there and the stack stays balanced either way.
+        Sites.Expect(body[callIndex].OpCode == OpCodes.Newobj || !target.MethodSig.HasThis,
+            $"{method.Name}: {what} is an instance method; the call site pushes a receiver that " +
+            "the static VirtualSource.OpenOrFile would not consume");
+        Sites.Expect(callIndex >= 5, $"{method.Name}: not enough instructions before {what}");
+
+        // Nothing may jump into the middle of the argument run, and no exception-handler
+        // boundary may sit on it; either would make the disposal below break control flow.
+        ExpectNotTargeted(method, body, callIndex - 5, 6, $"the {what} argument run");
+
+        for (int back = 1; back <= 5; back++)
+        {
+            var arg = body[callIndex - back];
+            Sites.Expect(IsSingleValuePush(arg.OpCode),
+                $"{method.Name}: argument {back} before {what} is {arg.OpCode}, which is not a " +
+                "simple single-value push; re-derive this rewrite against the current IL");
+            arg.OpCode = OpCodes.Nop; arg.Operand = null;
+        }
+
+        body[callIndex].OpCode = OpCodes.Call;
+        body[callIndex].Operand = shim.OpenOrFile;
+        WidenFileStreamLocal(method, body, callIndex);
     }
 
     /// <summary>

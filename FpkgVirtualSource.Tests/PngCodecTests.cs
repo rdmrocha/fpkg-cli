@@ -10,9 +10,8 @@ namespace FpkgVirtualSource.Tests;
 /// read with File.ReadAllBytes and packed as-is — so every one of these cases is a defect that
 /// would otherwise reach a console.
 ///
-/// The corruption shapes are taken from a real dump
-/// (Control.Ultimate.Edition.PPSA01949.v1.0.0005): its pic2.png is 532 bytes of high-entropy data
-/// with no PNG signature, sitting next to a valid pic2.dds.
+/// The corruption shapes are taken from a real dump: its pic2.png is 532 bytes of high-entropy
+/// data with no PNG signature, sitting next to a valid pic2.dds.
 /// </summary>
 public class PngCodecTests
 {
@@ -50,7 +49,7 @@ public class PngCodecTests
     [Fact]
     public void RejectsHighEntropyDataWithNoSignature()
     {
-        // The Control pic2.png case, reduced: 532 bytes that are not a PNG at all.
+        // The observed pic2.png case, reduced: 532 bytes that are not a PNG at all.
         var junk = new byte[532];
         new Random(1).NextBytes(junk);
         Assert.False(PngCodec.IsValid(junk, out var reason));

@@ -4,7 +4,7 @@ using dnlib.DotNet;
 namespace VirtualSourcePatcher;
 
 /// <summary>
-/// Rewrites the seven LibProsperoPkg IL sites that make <c>ffpfsc:&lt;handle&gt;:/…</c> paths
+/// Rewrites the nine LibProsperoPkg IL sites that make <c>ffpfsc:&lt;handle&gt;:/…</c> paths
 /// resolve through FpkgVirtualSource, so a container can be used as a build source.
 ///
 /// The body below was the whole of a top-level-statement Program.cs. It is a callable entry
@@ -63,6 +63,21 @@ public static class VirtualSourcePatcherProgram
             var isLooseElf = Sites.Method(builder, "IsLooseElf", "System.Boolean", 1);
             var isSelf = Sites.Method(builder, "IsSelf", "System.Boolean", 1);
             var sceVersion = Sites.Method(builder, "GetApplicationSceVersion", "System.Byte[]", 1);
+            // Reached only when an SDK override is set. Both halves open the ORIGINAL executable
+            // by SourcePath - the probe to find the .sceversion offset, the Write delegate to copy
+            // the prefix - so a container source needs both virtualised.
+            var sdkSelf = Sites.Method(builder, "BuildSdkOverriddenSelf", "LibProsperoPkg.PFS.FSFile", 2);
+            var sdkSelfCopy = builder.NestedTypes
+                .SelectMany(t => t.Methods)
+                .Where(m => m.HasBody && m.MethodSig.Params.Count == 1 &&
+                            m.MethodSig.Params[0].FullName == "System.IO.Stream" &&
+                            m.DeclaringType.Fields.Any(f => f.Name == "sourcePath") &&
+                            m.DeclaringType.Fields.Any(f => f.Name == "patchOffset") &&
+                            m.DeclaringType.Fields.Any(f => f.Name == "patch"))
+                .ToList();
+            Sites.Expect(sdkSelfCopy.Count == 1,
+                "expected exactly one (sourcePath, patchOffset, patch) closure method taking a " +
+                $"Stream - the SDK-patch copy delegate - found {sdkSelfCopy.Count}");
 
             var fsFileCtor = fsFile.FindConstructors().SingleOrDefault(c =>
                 c.MethodSig.Params.Count == 2 &&
@@ -75,6 +90,7 @@ public static class VirtualSourcePatcherProgram
                      {
                          ("OpenRead", openRead), ("Populate", populate), ("IsLooseElf", isLooseElf),
                          ("IsSelf", isSelf), ("GetApplicationSceVersion", sceVersion), ("FSFile..ctor", fsFileCtor),
+                         ("BuildSdkOverriddenSelf", sdkSelf), ("SDK-patch copy", sdkSelfCopy[0]),
                      })
                 Console.WriteLine($"  located {name,-24} {m.FullName}");
 
@@ -88,12 +104,13 @@ public static class VirtualSourcePatcherProgram
             Rewrites.PrependVirtualOpen(openRead, sourcePathGetter, shim);
             Rewrites.VirtualiseFsFileCtor(fsFileCtor, fsFile, shim);
             Rewrites.PrependTreeOverlay(populate, shim.TreeOverlay);
-            foreach (var probe in new[] { isLooseElf, isSelf, sceVersion })
+            foreach (var probe in new[] { isLooseElf, isSelf, sceVersion, sdkSelf })
                 Rewrites.VirtualiseProbe(probe, shim);
             Rewrites.WidenPlaintextBlockReader(plaintextReader, shim);
+            Rewrites.VirtualiseSelfPatchCopy(sdkSelfCopy[0], shim);
 
             module.Write(output);
-            Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7)");
+            Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7, 8, 9)");
             return 0;
         }
         catch (Exception ex)

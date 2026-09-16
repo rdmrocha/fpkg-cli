@@ -6,7 +6,7 @@ Builds PS5 debug FPKG packages — and it does two things the official tooling d
 
 **It runs on macOS and Linux**, arm64 or x64. The packaging engine is **LibProsperoPkg by Drakmor**; this is a command-line front end for it, because the official GUI is Windows-only WinForms and cannot run here.
 
-This is **fpkg 0.6.7**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.7 belongs with a LibProsperoPkg 0.6.7 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
+This is **fpkg 0.6.7-fix1**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.7-fix1 belongs with a LibProsperoPkg 0.6.7 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
 
 Nothing in this zip is Drakmor's work, Sony's, or RAD's. You supply those yourself.
 

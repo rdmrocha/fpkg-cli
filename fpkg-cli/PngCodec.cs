@@ -28,10 +28,10 @@ internal static class PngCodec
     /// the whole chunk chain with every declared length and CRC-32 checked, ending at IEND with
     /// nothing after it.
     ///
-    /// Each of those catches a failure mode seen in real dumps: no signature at all (a Control
-    /// dump's pic2.png is 532 bytes of high-entropy data), a chunk that runs past EOF
-    /// (truncation), and a CRC mismatch (bit-rot). The cost is one pass over a file that is about
-    /// to be Kraken-compressed anyway.
+    /// Each of those catches a failure mode seen in real dumps: no signature at all (one dump's
+    /// pic2.png is 532 bytes of high-entropy data), a chunk that runs past EOF (truncation), and a
+    /// CRC mismatch (bit-rot). The cost is one pass over a file that is about to be
+    /// Kraken-compressed anyway.
     /// </summary>
     internal static bool IsValid(ReadOnlySpan<byte> data, out string reason)
     {
