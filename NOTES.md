@@ -173,6 +173,81 @@ Once `./fpkg patch` has been run with an Oodle library present, this same comman
 
 Not yet exposed by the CLI: `SdkVersionOverride`, `PublishingToolsLibraryPath`.
 
+## Upstream 0.6.8
+
+Release notes: improved image checks including PlayGo ("please verify your images"); fixed an issue with PlayGo map creation; default DRM Standard; automatic downgrading of the required software version to the SDK-specified version. All four confirmed below. Library +552 lines, GUI +3; only `LibProsperoPkg.*` and the GUI changed.
+
+### The PlayGo map was wrong, and the new checker proves it
+
+Two changes in `BuildContainer`:
+
+```csharp
+// initial chunk count: was every chunk, now just chunk 0
+BuildChunkDat(…, chunkCount, counts.ScenarioCount, chunkCount, ulong.MaxValue)   // 0.6.7
+BuildChunkDat(…, chunkCount, counts.ScenarioCount, 1,          ulong.MaxValue)   // 0.6.8
+
+// final extent size
+num7 = pkg3.Header.pfs_image_size + pkg3.Header.pfs_image_offset;   // 0.6.7
+num7 = pkg3.Header.pfs_image_size + 65536;                          // 0.6.8
+```
+
+The doc line "with every chunk required before starting each scenario" went with the first.
+
+The second is the real defect. `LayOutEntries` runs earlier in `BuildContainer` and sets `pfs_image_offset = body_offset + body_size` — the CNT's own extent, not the package-absolute outer-PFS start of `0x10000`. So the last PlayGo extent was sized from the wrong base, and the manifest claimed more of the mount image than exists.
+
+It only bites when the CNT body runs past 64 KiB, which is why it survived: the same source built twice, differing only in how much `sce_sys` it carried, gives
+
+| CNT body | result under 0.6.8's checker |
+|---|---|
+| 12 entries, `8192 + 57344 = 65536` | passes — the two bases coincide |
+| 17 entries, `8192 + 122880 = 131072` | `PlayGo extents cover 0x880000 bytes; the package image before CNT requires 0x870000` |
+
+`0x10000` over, exactly the gap. Rebuilt from the identical source on 0.6.8: clean. So any package this CLI produced before 0.6.8 with a full `sce_sys` carries an overlong final extent. A real 658 MB retail-derived package tested here happens to pass, so it is not universal.
+
+### requiredSystemSoftwareVersion, fourth revision in four releases
+
+```csharp
+if (sdkVersionOverride.HasValue) {
+    value = ProsperoSdkVersions.ToPackageVersion(valueOrDefault);
+    jsonObject["requiredSystemSoftwareVersion"] = VersionText(value);   // new in 0.6.8
+} else {
+    value = HexVersion(jsonObject["sdkVersion"]);
+    jsonObject["requiredSystemSoftwareVersion"] ??= "0x0000000000000000";
+}
+jsonObject["sdkVersion"] = VersionText(value);
+```
+
+```
+0.6.4   Max(Min(required, 0x0900…), sdk)   ceiling 9.00, floor sdk
+0.6.6   Max(required, sdk)                 no ceiling, floor sdk
+0.6.7   passthrough; 0x0 when absent       decoupled entirely
+0.6.8   override set -> required = sdk     the SDK drives it
+```
+
+This is the downgrade lever that did not exist in 0.6.6 or 0.6.7. Measured: a source declaring `requiredSystemSoftwareVersion 0x1200000000000000` and `sdkVersion 0x0500000000000000` builds, with `--sdk-version 1`, to `0x0100000000000000` in both fields, source untouched.
+
+### DRM defaults
+
+`applicationDrmCombo.SelectedIndex` moved 0 -> 1, and the constant `StandardApplicationDrmSelection = 1` appeared. `applicationDrmSelection` is now initialised to 1 as well.
+
+Worth recording separately: `additionalContentDrmSelection = 1` is a plain field initializer in **0.6.7 too**, and index 1 for an AC volume maps to `Entitlement`. This CLI shipped `--ac-drm free` in the 0.6.7 alignment, which was simply wrong about the GUI rather than a deliberate divergence. Corrected in 0.6.8.
+
+### The new checker
+
+`ProsperoPlayGo.ValidateLayout(chunkData, ficmData, hashTableData, scenarioJson, expectedContentId, expectedMountSize)` returning `ProsperoPlayGoLayoutInfo(ChunkCount, ScenarioCount, ExtentCount, CoveredBytes, FileCount)`. It checks section overlap, table sizing, chunk->extent and scenario->chunk reference bounds, extent coverage against the mount size, FICM assignments, the FLT table, scenario JSON, default-scenario id range, default language presence in the header mask, and content id as printable ASCII matching the CNT.
+
+It is called from `VerifyPackageQuick`, and `VerifyPackageFull` calls `VerifyPackageQuick` first before adding its three payload passes — so the PlayGo finding is identical between the two, and quick is sufficient for it. Timings on a 658 MB package: quick 1.3 s, full 2.4 s.
+
+The GUI wires `VerifyPackageQuick`/`Full` to two buttons on its Extract tab (renamed "Extract and verify") and **nowhere else**. Its post-build step is still its own `VerifyOutput` — container type, signed byte, outer-PFS mode, marker, optional SHA-256. That is why the release note asks users to verify by hand, and why this CLI now runs the quick pass at the end of a build instead.
+
+### Minor
+
+`BuildTemplateChunkInfo` masks a recovered language mask with `KnownMask` and falls back to all-languages if that empties it. `Gp5Scenario` gained `ShouldSerializeLabel()`. `Gp5Project.ReadFrom`/`WriteTo` call `EnsureDefaultPlayGoScenario`, which fills in `Id 0`, `Type "playmode"`, `InitialChunkCount 1`, `Chunks "0-N"` when `chunk_info` exists with no scenarios.
+
+### Patcher
+
+All nine IL sites resolve on 0.6.8 with the same ordinals as 0.6.7. No change needed.
+
 ## Upstream 0.6.6 / 0.6.7
 
 0.6.6 was pulled by Drakmor shortly after release. 0.6.7's notes read: fixed DRM and PlayGo issues; fixed the packaging of uncompressed chunks; added unpacking, image verification and DLC template export. Independent diff of all three trees below; the decompiles were `ilspycmd` over each release's `LibProsperoPkg.dll`.
@@ -370,7 +445,9 @@ Hardcoded, not surfaced anywhere: `OutputFormat = DebugImage`, `UsePublisherPprN
 | PlayGo languages | n/a | **all** (`ulong.MaxValue`), new dialog | all |
 | SDK version | SDK 1.00 (index 1) | **Auto** (index 0) | **SDK 1.00** (index 1) |
 | Application DRM | n/a (no override existed) | **Free** (new combo) | Free |
-| Additional-content DRM | n/a | n/a | **Free** (combo shared with the above) |
+| Additional-content DRM | n/a | n/a | **Entitlement** (combo shared with the above) |
+
+0.6.8 then moves Application DRM to **Standard** and leaves Additional-content at Entitlement. See "Upstream 0.6.8".
 
 Everything else in the table is unchanged in 0.6.7: level 7, block 256 KiB, PFS v2, `UsePublisherPprNaps`, coalescing, relocation alignment, deterministic, and the `MinimumLayoutSavings` pair (1 MiB / 0.1%).
 

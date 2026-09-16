@@ -84,7 +84,7 @@ internal static class Program
           fpkg info <file.pkg>          detect container type and dump the CNT header/entries
           fpkg verify <file.pkg> [mode] structural FIH check (mode: Native | PlaintextNoAuth)
           fpkg verify <file.pkg> --quick | --full [--passcode <32>] [--workers <n>]
-                                        the library's own verifiers (0.6.7). --quick checks
+                                        the library's own verifiers. --quick checks
                                         segment ranges, FIH/CNT cross-references, entry
                                         digests, the outer superblock ICV and the SI
                                         directory; --full also decodes every outer block,
@@ -127,23 +127,23 @@ internal static class Program
                                   matching the GUI; needs the A53 PPR read selector on
                                   the console. Use Native for publisher-compatible output.)
           --format <name>         DebugImage | MetadataContainer | RetailImage (default DebugImage)
-          --playgo <1-255>        generated PlayGo chunk count (library default: 100 as of
-                                  0.6.6, was 64; pass 1 for the verified publisher nwonly
-                                  profile). Ignored when the source carries playgo-chunk.dat
-                                  or playgo-scenario.json, or when a GP5 declares chunk_info.
-                                  Refused when the source has fewer 64 KiB blocks than
-                                  chunks: upstream dropped that check in 0.6.6 and now
-                                  silently emits zero-length chunk extents.
+          --playgo <1-255>        generated PlayGo chunk count      (library default: 100)
+                                  Pass 1 for the publisher nwonly profile. Ignored when the
+                                  source carries playgo-chunk.dat or playgo-scenario.json, or
+                                  when a GP5 declares chunk_info. Refused when the source has
+                                  fewer 64 KiB blocks than chunks, which the library itself
+                                  does not check and would build as zero-length extents.
           --playgo-languages <l>  comma-separated PlayGo language codes, or "all" (default all)
                                   Also picks the default language written into
                                   playgo-chunk.dat: en-US when present, else the first set.
           --app-drm <free|standard>
-                                  applicationDrmType for an Application volume (default free,
-                                  matching the 0.6.7 GUI). free sets drm_type 0 and emits no
-                                  debug licence; standard sets drm_type 16 and generates one
-                                  when the source has none.
+                                  applicationDrmType for an Application volume (default standard,
+                                  matching the GUI). free sets drm_type 0 and emits no debug
+                                  licence; standard sets drm_type 16 and generates one when the
+                                  source has none.
           --ac-drm <free|entitlement>
-                                  applicationDrmType for AdditionalContentData (default free).
+                                  applicationDrmType for AdditionalContentData
+                                                                       (default entitlement)
                                   free also OMITS license.dat and license.info entirely - one
                                   library predicate drives drm_type and the licence together.
           --compress              store the inner pfs_image.dat PFSC-compressed
@@ -155,12 +155,11 @@ internal static class Program
                                   identifier.                                  (default 1)
                                   Rewrites the .sceversion trailer in SELF binaries;
                                   param.json gets the canonical major/minor form.
-                                  "keep" leaves the source's own values alone.
-                                  Since 0.6.7 this no longer moves
-                                  requiredSystemSoftwareVersion in either direction: 0.6.4
-                                  clamped it to 9.00 and floored it at the SDK, 0.6.6 kept
-                                  the floor, 0.6.7 passes param.json through untouched
-                                  (and writes 0x0 when the field is absent).
+                                  This ALSO SETS requiredSystemSoftwareVersion to the same
+                                  version, which is how a dump demanding newer firmware than
+                                  you have gets brought down: with the default of 1 a build
+                                  declares firmware 1.00. "keep" leaves both the source's
+                                  sdkVersion and its firmware requirement untouched.
           --kraken-backend <name> Auto | Oodle | BuiltIn | Automatic |
                                   Uncompressed                                   (default Auto)
                                   Auto picks Oodle when the native backend is available and
@@ -185,7 +184,13 @@ internal static class Program
           --kraken-threads <n>    concurrent Kraken encoders, 0 = CPU count    (default 0)
           --no-deterministic      allow a random outer-PFS seed (deterministic is the default)
           --no-param-json         do not synthesise a missing param.json
-          --no-verify             skip the post-build structural check
+          --no-verify             skip both post-build checks: the structural FIH inspection
+                                  and the library's quick verifier (segment ranges, CNT and
+                                  entry digests, PlayGo layout, outer superblock ICV, NAPS
+                                  layout, inner inode metadata, SI directory). The quick pass
+                                  costs about a second on a 650 MB package; a failure fails the
+                                  build, though the package is still written so it can be
+                                  inspected.
           --retain-sce-sys        keep every sce_sys file. By default license.*, playgo-*,
                                   origin-param.json and target-param.json are set aside for
                                   the build and put back afterwards: a retail dump's copies
@@ -196,8 +201,8 @@ internal static class Program
                                   pic0, pic1 and pic2 .png are validated (signature, chunk
                                   chain, CRC-32, IEND, no trailing bytes) and a corrupt one
                                   is set aside so the builder rebuilds it from its .dds;
-                                  icon0 and pic0 have no reverse path upstream, so those two
-                                  are regenerated here. Corrupt with no usable .dds fails.
+                                  icon0 and pic0 have no reverse path in the library, so those
+                                  two are regenerated here. Corrupt with no usable .dds fails.
           --v3                    alias for --pfs-format v3. Like the GUI's "PFS v3", this
                                   alone changes nothing measurable - see --shuffle-analysis.
           --pfs-format <v2|v3>    PFS compression metadata format             (default v2)
@@ -471,6 +476,30 @@ internal static class Program
 
 #if LIB_HAS_ARCHIVE_067
     /// <summary>
+    /// The library's own quick verifier, run over a package this CLI just built. Reports every
+    /// check by name and returns false if any issue was raised.
+    ///
+    /// Deliberately the quick pass and not the full one: VerifyPackageFull calls
+    /// VerifyPackageQuick first and then decodes every outer block, NAPS chunk and inner file, so
+    /// the structural and metadata findings — PlayGo layout included — are identical between the
+    /// two. What full adds is payload integrity, which is a property of data the build just wrote
+    /// from a source it already read, so re-decoding it here buys much less than it costs on a
+    /// large image. `fpkg verify &lt;pkg&gt; --full` is there when that is what you want.
+    /// </summary>
+    private static bool QuickVerify(string packagePath, string passcode)
+    {
+        Console.WriteLine();
+        var result = ProsperoPackageArchive.VerifyPackageQuick(packagePath, passcode);
+        foreach (var check in result.Checks) Console.WriteLine($"  ok: {check}");
+        if (result.Issues.Count == 0) return true;
+        foreach (var issue in result.Issues) Console.Error.WriteLine($"  ISSUE: {issue}");
+        Console.Error.WriteLine(
+            $"error: the package was written but failed verification with {result.Issues.Count} " +
+            "issue(s). It is on disk so it can be inspected; do not use it.");
+        return false;
+    }
+
+    /// <summary>
     /// Exports the CNT inputs needed to rebuild a data-bearing AC package, plus a GP5 project
     /// rooted at the exported folder. The inner-PFS payload is deliberately NOT exported — an AC
     /// package keeps its whole sce_sys in the CNT, so the CNT entries are the complete non-payload
@@ -646,23 +675,26 @@ internal static class Program
             return Fail("--playgo needs a library with ProsperoBuildOptions.PlayGoChunkCount; this binary was built against an older release");
 #endif
 
-        // applicationDrmType for an Application volume. Defaults to "free", matching the 0.6.7
-        // GUI. Until 0.6.6 the library had no override at all and this CLI rewrote param.json on
-        // disk to force "standard"; that whole mechanism is gone.
+        // applicationDrmType for an Application volume. "standard" matches the 0.6.8 GUI, which
+        // moved its combo back to index 1 after one release at Free. Until 0.6.6 the library had
+        // no override at all and this CLI rewrote param.json on disk to force "standard"; that
+        // whole mechanism is gone.
         ProsperoApplicationDrmType appDrm;
         {
-            var text = flags.GetValueOrDefault("app-drm", "free")!;
+            var text = flags.GetValueOrDefault("app-drm", "standard")!;
             if (!Enum.TryParse(text, ignoreCase: true, out appDrm)
                 || !Enum.IsDefined(appDrm)
                 || appDrm is not (ProsperoApplicationDrmType.Free or ProsperoApplicationDrmType.Standard))
                 return Fail($"--app-drm must be free or standard: {text}");
         }
-        // applicationDrmType for a data-bearing additional-content volume. "free" also omits
-        // license.dat / license.info entirely — one library predicate drives drm_type and the
-        // licence emission together.
+        // applicationDrmType for a data-bearing additional-content volume. "entitlement" matches
+        // the GUI, whose additionalContentDrmSelection field initializer has been 1 since the
+        // combo was introduced — this CLI defaulted it to free by mistake in 0.6.7. "free" also
+        // omits license.dat / license.info entirely, because one library predicate drives
+        // drm_type and the licence emission together.
         ProsperoAdditionalContentDrmType acDrm;
         {
-            var text = flags.GetValueOrDefault("ac-drm", "free")!;
+            var text = flags.GetValueOrDefault("ac-drm", "entitlement")!;
             if (!Enum.TryParse(text, ignoreCase: true, out acDrm) || !Enum.IsDefined(acDrm))
                 return Fail($"--ac-drm must be free or entitlement: {text}");
         }
@@ -944,8 +976,13 @@ internal static class Program
         Console.WriteLine(PlayGoStatus(source, options.PlayGoChunkCount, gp5Path));
         // Only meaningful when the count actually comes from the flag; when the source or a GP5
         // supplies it, PlayGoChunkCount is never consulted and checking it rejects good builds.
+#if HAS_VIRTUAL_SOURCE
+        long? measuredSourceBytes = containerSource?.ContentBytes;
+#else
+        long? measuredSourceBytes = null;
+#endif
         if (PlayGoCountComesFromFlag(source, gp5Path)
-            && PlayGoChunkCountProblem(source, options.PlayGoChunkCount) is string chunkProblem)
+            && PlayGoChunkCountProblem(source, options.PlayGoChunkCount, measuredSourceBytes) is string chunkProblem)
             return Fail(chunkProblem);
 #if LIB_HAS_IMAGE_MODE
         Console.WriteLine($"Building {options.Mode} / {options.OutputFormat} / image={imageMode}");
@@ -1038,6 +1075,17 @@ internal static class Program
             VerifyOutput(result.OutputPath, imageMode == ProsperoPublisherImageMode.PlaintextNoAuth);
 #else
             VerifyOutput(result.OutputPath, expectPlaintextMarker: false);
+#endif
+#if LIB_HAS_ARCHIVE_067
+            // VerifyOutput above is a structural FIH inspection — container type, signed byte,
+            // outer-PFS mode, seed marker. It says nothing about the CNT entries, and 0.6.8's
+            // release note ("please verify your images") exists precisely because upstream's own
+            // post-build step is the same shallow check: the GUI calls VerifyPackageQuick only
+            // from two buttons on its Extract tab, never after a build. So a wrong PlayGo map is
+            // produced, announced as "Verification passed", and only found if someone thinks to
+            // go looking. Running it here costs about a second on a 650 MB package and turns
+            // that into a build failure at the moment it is caused.
+            if (!QuickVerify(result.OutputPath, passcode)) return 1;
 #endif
         }
 
@@ -1463,6 +1511,14 @@ internal static class Program
 
         internal string SourceFolder { get; }
 
+        /// <summary>
+        /// Total bytes of the files inside the container, for checks that need the size of what
+        /// will actually be packed. SourceFolder cannot answer that: it is a staging root holding
+        /// only the sce_sys copy the unpatched metadata paths read, so measuring it under-reports
+        /// the payload by whatever the container carries.
+        /// </summary>
+        internal long ContentBytes => container.Files.Sum(f => f.Length);
+
         internal static ContainerSource Open(string path, string temporaryDirectory)
         {
             var container = FpkgVirtualSource.Container.Open(path);
@@ -1716,25 +1772,29 @@ internal static class Program
     /// produces 39 empty chunks. The default moved 64 -> 100 in 0.6.6, so this is easier to hit
     /// than it was. Re-checked here because the CLI knows the source size before the build.
     /// </summary>
-    private static string? PlayGoChunkCountProblem(string source, int chunks)
+    private static string? PlayGoChunkCountProblem(string source, int chunks, long? measuredBytes)
     {
         if (chunks <= 1) return null;
         long bytes;
-        try
+        if (measuredBytes is long known) bytes = known;
+        else
         {
-            bytes = new DirectoryInfo(source)
-                .EnumerateFiles("*", SearchOption.AllDirectories)
-                .Sum(f => f.Length);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;   // can't measure it; let the build proceed rather than guess
+            try
+            {
+                bytes = new DirectoryInfo(source)
+                    .EnumerateFiles("*", SearchOption.AllDirectories)
+                    .Sum(f => f.Length);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return null;   // can't measure it; let the build proceed rather than guess
+            }
         }
         var blocks = bytes / 65536;
         if (blocks >= chunks) return null;
         return $"--playgo {chunks} exceeds what this source can fill: {bytes:N0} bytes is {blocks} " +
                $"block(s) of 64 KiB, so {chunks - blocks} chunk(s) would get a zero-length main " +
-               $"extent. Upstream dropped this check in 0.6.6 and builds it anyway. Use --playgo " +
+               $"extent, which the library does not check and would build anyway. Use --playgo " +
                $"{Math.Max(1, blocks)} or fewer.";
     }
 

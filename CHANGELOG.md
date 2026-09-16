@@ -1,5 +1,24 @@
 # Changelog
 
+## fpkg 0.6.8
+
+Tracks LibProsperoPkg 0.6.8. Re-run `./fpkg patch` after updating.
+
+### Builds are now verified properly
+Every build already ended with a structural look at the finished file. It now also runs the library's quick verifier: segment ranges, CNT and entry digests, **PlayGo layout**, the outer superblock ICV, the NAPS layout, inner inode metadata and the SI directory. About a second on a 650 MB package, and a failure fails the build. `--no-verify` skips both.
+
+This is worth having because the PlayGo map is exactly the thing 0.6.8 fixed, and the official GUI still runs only the structural half after a build — its own quick and full verifiers are manual buttons on the Extract tab. A package either tool calls "verified" today has not had its PlayGo layout checked; now ours has.
+
+**Packages built with earlier versions may fail this check.** The final PlayGo extent was sized against the wrong base, overrunning the mount image by however far the CNT body ran past 64 KiB — so a package with a full `sce_sys` is affected and a minimal one is not. `fpkg verify <pkg> --quick` reports it as `PlayGo extents cover 0x… bytes; the package image before CNT requires 0x…`. Rebuilding on 0.6.8 fixes it.
+
+### Changed defaults
+- `--app-drm` now defaults to **standard**, following the GUI.
+- `--ac-drm` now defaults to **entitlement**. This also corrects a mistake: the GUI has defaulted add-on content to Entitlement all along, and `fpkg` shipped `free`.
+- `--sdk-version` still defaults to `1`, but it now **also sets `requiredSystemSoftwareVersion`** to the same version. That is the point of the release — a dump demanding newer firmware than you have is brought down to the SDK you pick. A default build therefore declares firmware 1.00; `--sdk-version keep` leaves the source's own value untouched.
+
+### Also in the library
+PlayGo maps now mark only chunk 0 as initially required, so progressive install is actually progressive, and a GP5 that declares `chunk_info` without any scenario gets a conventional play-mode scenario filled in.
+
 ## fpkg 0.6.7-fix1
 
 Fixes one regression in 0.6.7. Re-run `./fpkg patch` after updating — this release changes what the patch does.
