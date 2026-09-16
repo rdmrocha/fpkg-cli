@@ -24,6 +24,9 @@
          alongside TestResolver's. The file is self-contained and touches nothing but the
          filesystem, so linking it keeps the tests honest without that entanglement. -->
     <Compile Include="../fpkg-cli/PatchStamp.cs" Link="PatchStamp.cs" />
+    <!-- Linked for the same reason as PatchStamp: PngCodec is self-contained (BCl only) and
+         guards what reaches a package, so it is tested directly rather than through the Exe. -->
+    <Compile Include="../fpkg-cli/PngCodec.cs" Link="PngCodec.cs" />
     <ProjectReference Include="../FpkgVirtualSource/FpkgVirtualSource.csproj" />
     <!-- Not transitive: FpkgVirtualSource's LibProsperoPkg reference has Private=false, which
          MSBuild does not propagate across ProjectReference. ByteSource implements IMemoryReader

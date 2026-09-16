@@ -139,7 +139,21 @@ fi
 
 rm -f "$out"
 cp "$here/dist/README.md" "$here/README.md"
-(cd "$here" && zip -qr "$out" README.md fpkg fpkg-tools/bin fpkg-tools/native)
+# fpkg-tools/native/ is where the USER drops their own RAD Oodle library, so on any machine
+# that has actually used the Oodle backend it is not empty - and a plain `zip -r` of it
+# redistributes liboo2core*, which carries Unreal Engine EULA terms. Only README.txt is ever
+# shipped from that directory, and it is named explicitly rather than filtered by pattern: an
+# allowlist cannot be defeated by a file name nobody predicted.
+(cd "$here" && zip -qr "$out" README.md fpkg fpkg-tools/bin \
+     && zip -q "$out" fpkg-tools/native/README.txt)
 rm -f "$here/README.md"
+
+# Belt and braces: prove nothing licence-encumbered made it in, whatever is on disk.
+if unzip -l "$out" | grep -qiE 'oo2core|oo2net|oo2tex|libScePubTools|LibProsperoPkg'; then
+    echo "error: $out contains third-party binaries that must not be redistributed:" >&2
+    unzip -l "$out" | grep -iE 'oo2core|oo2net|oo2tex|libScePubTools|LibProsperoPkg' >&2
+    rm -f "$out"
+    exit 1
+fi
 printf '%s  %s  (%s files)\n' "$(basename "$out")" \
     "$(du -h "$out" | cut -f1)" "$(unzip -l "$out" | tail -1 | awk '{print $2}')"

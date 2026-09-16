@@ -11,20 +11,19 @@ works too, and produces a byte-identical package.
 Drakmor**; this is a command-line front end for it, because the official GUI is
 Windows-only WinForms and cannot run here.
 
-This is **fpkg 0.6.4**. The version number tracks the LibProsperoPkg release it is built
-and tested against, so `fpkg` 0.6.4 belongs with a LibProsperoPkg 0.6.4 folder. `./fpkg
+This is **fpkg 0.6.7**. The version number tracks the LibProsperoPkg release it is built
+and tested against, so `fpkg` 0.6.7 belongs with a LibProsperoPkg 0.6.7 folder. `./fpkg
 version` prints both, side by side, for whatever you actually have.
 
 Nothing in this zip is Drakmor's work, Sony's, or RAD's. You supply those yourself.
 
 ## What you need
 
-- **A LibProsperoPkg release** (0.6.4 or compatible) — unzip it somewhere; that folder
+- **A LibProsperoPkg release** (0.6.7 or compatible) — unzip it somewhere; that folder
   is your working directory.
-- **The .NET 10 runtime**: `brew install dotnet`. The `fpkg-cli-standalone-<version>-<rid>.zip` variant
-  carries its own runtime and needs nothing installed.
-- macOS or Linux, arm64 or x64. This one `fpkg-cli-<version>.zip` runs on any of the four; the
-  self-contained builds are one zip per platform (see "Standalone builds" below).
+- **The .NET 10 runtime**: `brew install dotnet`.
+- macOS or Linux, arm64 or x64. One `fpkg-cli-<version>.zip` runs on all four: it is
+  portable IL, not a per-platform build.
 - **Optional but worth it: a RAD Oodle library**, version 2.9.16. It makes builds roughly
   three times faster. Get it *before* you patch — see "Optional: the native Oodle
   encoder" below for the exact file names to look for.
@@ -43,20 +42,6 @@ your-release-folder/
     bin/
     native/
 ```
-
-### Standalone builds
-
-`fpkg-cli-<version>.zip` is framework-dependent: portable IL that runs on macOS or Linux, arm64 or
-x64, as long as the .NET 10 runtime is installed. If you would rather not install
-anything, grab the self-contained zip for your platform instead — it bundles its own
-runtime and is named after the RID it was built for:
-
-- `fpkg-cli-standalone-0.6.4-osx-arm64.zip`
-- `fpkg-cli-standalone-0.6.4-osx-x64.zip`
-- `fpkg-cli-standalone-0.6.4-linux-arm64.zip`
-- `fpkg-cli-standalone-0.6.4-linux-x64.zip`
-
-Unpack whichever one matches your machine the same way, into the release folder.
 
 ## Optional: the native Oodle encoder
 
@@ -115,17 +100,18 @@ The output is a debug (FIH) image. Installing it needs a console that accepts on
 
 ## What a build changes in your source, and puts back
 
-A retail dump used as-is produces a package the console refuses to run. Two fix-ups are
-therefore on by default. **Both are reverted when the build ends**, including after an
-error or a Ctrl-C, and a run killed mid-build is repaired by the next one. Nothing is
+A retail dump used as-is produces a package the console refuses to run. Three fix-ups are
+therefore on by default. **All of them are reverted when the build ends**, including after
+an error or a Ctrl-C, and a run killed mid-build is repaired by the next one. Nothing is
 left modified in your dump.
 
-**`applicationDrmType` is forced to `"standard"`.** Left at the `"upgradable"` a retail
-dump carries, the packaging library stamps a DRM type into the package header and skips
-generating the debug licence — that is the lock, and the package will not run. `fpkg`
-edits that one value in `sce_sys/param.json` textually, so key order and every other byte
-survive, and restores the original afterwards. The backup is kept in a temp directory,
-never beside your files. `--retain-param-json` opts out.
+**`applicationDrmType` is set through the library, not by editing your files.** Up to
+LibProsperoPkg 0.6.5 there was no way to override it and `fpkg` rewrote `param.json` on
+disk; 0.6.6 added a proper build option, so that no longer happens. The default is
+`free`, matching the official GUI. Use `--app-drm standard` for a licensed application,
+or `--ac-drm entitlement` for add-on content that needs an entitlement key — note that
+`--ac-drm free` also omits `license.dat` and `license.info` entirely, because upstream
+drives the DRM type and the licence from one switch.
 
 **Stale `sce_sys` files are moved aside for the duration of the build**, then moved back:
 
@@ -135,8 +121,52 @@ never beside your files. `--retain-param-json` opts out.
 | `playgo-chunk.dat`, `playgo-hash-table.dat`, `playgo-ficm.dat` | they describe the *old* image layout; if present they win over the ones regenerated for your new PFS, including over `--playgo` |
 | `origin-param.json`, `target-param.json` | not package entries at all — left in place they ride into the inner filesystem as junk files |
 
-`--retain-sce-sys` opts out. Keep both opt-outs in mind only if you know why you want
-them: with either one on, the package builds fine and then fails on the console.
+`--retain-sce-sys` opts out. You need it when building an **exported add-on template**
+(see below), whose licence and PlayGo files are deliberate inputs rather than stale ones;
+`fpkg` detects that case and tells you rather than quietly deleting them.
+
+**Corrupt `sce_sys` images are rebuilt from their `.dds`.** Dumps really do contain
+damaged artwork — one we tested has a `pic2.png` that is 532 bytes of random data with no
+PNG header at all, sitting next to a perfectly good `pic2.dds`. Upstream never checks: a
+present file is packed exactly as found, and its own "restore a missing pic1/pic2" path
+is Windows-only because it encodes through a native library that does not ship for macOS
+or Linux. So `fpkg` validates `icon0`, `pic0`, `pic1` and `pic2` `.png` properly —
+signature, chunk chain, CRC-32, `IEND`, no trailing bytes — and regenerates any that fail
+from the matching `.dds`, in managed code that works everywhere. A damaged image with no
+usable `.dds` stops the build instead of shipping. `--no-media-repair` opts out.
+
+Keep the opt-outs in mind only if you know why you want them: with any of them on, the
+package may build fine and then fail on the console.
+
+## Reading and checking existing packages
+
+```sh
+# what is in it, and is it sound
+./fpkg verify GAME.pkg --quick          # structure, digests, superblock ICV, SI directory
+./fpkg verify GAME.pkg --full           # also decodes every block, chunk and inner file
+
+# pull it apart
+./fpkg extract GAME.pkg out/            # the inner filesystem
+./fpkg extract GAME.pkg out/ --rebuild-source
+                                        # just the sce_sys inputs a rebuild needs
+
+# turn an add-on package back into something you can rebuild
+./fpkg template DLC.pkg template-dir/
+```
+
+`--rebuild-source` and `template` read package entries only and never touch the inner
+filesystem, so they finish in seconds even on a large package.
+
+A template is the `sce_sys` inputs plus a `.gp5` project carrying the content id,
+passcode, entitlement key and PlayGo counts recovered from the package. **The payload is
+not included** — copy your own data tree in beside it, then:
+
+```sh
+./fpkg build --source template-dir --out out/ --gp5 template-dir/*.gp5 --retain-sce-sys
+```
+
+Add-on packages that carry data are the only kind this works on, because they are the only
+kind whose whole `sce_sys` lives in the package entries.
 
 ## Compression levels
 
@@ -161,3 +191,25 @@ package. Get a matching `fpkg`.
 
 **Slow builds** — you are probably on BuiltIn at level 7. Use `--kraken-backend Oodle`,
 or `--kraken-level 6`.
+
+## Thanks
+
+`fpkg` is a thin front end. Essentially all of the hard work — understanding the PS5
+package format, the outer and inner PFS, NAPS, PlayGo, the CNT entry tables and the
+signing and digest chains — belongs to other people.
+
+**[Drakmor](https://github.com/drakmor/) and SvenGDK**, for LibProsperoPkg and its GUI.
+This tool would not exist without it and does not replace it: it drives their library
+unchanged, on the platforms their GUI cannot reach. Every packaging decision here is
+theirs; the bugs are ours. The GUI is the reference implementation, and when the two
+disagree, believe the GUI.
+
+**The wider PS5 and PS4 homebrew scene**, whose accumulated reverse engineering every one
+of these tools stands on — the people who worked out the PFS and PKG layouts, the PlayGo
+chunk tables, the SELF and `.sceversion` structures and the key derivations, and then
+wrote it all down in public. Most of that work is unsigned, or signed with a handle in a
+forum post or a commit message. It is no less load-bearing for that.
+
+**[PSBrew's MkPFS](https://github.com/PSBrew/MkPFS)**, used here as an independent second
+implementation while developing the container reader. Having two readers disagree is how
+several bugs on our side were found.

@@ -46,6 +46,9 @@ internal static class Program
                 "info"   => Info(args),
                 "verify" => Verify(args),
                 "extract" => Extract(args),
+#if LIB_HAS_ARCHIVE_067
+                "template" => Template(args),
+#endif
                 "version" => Version(),
                 "build"  => Build(args),
                 // Dispatched before anything that touches a LibProsperoPkg type, and
@@ -80,6 +83,12 @@ internal static class Program
           fpkg keys                     report whether publishing key material is wired in
           fpkg info <file.pkg>          detect container type and dump the CNT header/entries
           fpkg verify <file.pkg> [mode] structural FIH check (mode: Native | PlaintextNoAuth)
+          fpkg verify <file.pkg> --quick | --full [--passcode <32>] [--workers <n>]
+                                        the library's own verifiers (0.6.7). --quick checks
+                                        segment ranges, FIH/CNT cross-references, entry
+                                        digests, the outer superblock ICV and the SI
+                                        directory; --full also decodes every outer block,
+                                        NAPS chunk and inner file. Exit 1 on any issue.
           fpkg api [filter]             list the library's public surface (substring filter)
           fpkg patch [--oodle] [--ffpfsc]
                                         patch LibProsperoPkg in this folder. No flags applies
@@ -91,6 +100,15 @@ internal static class Program
                                         unpack the inner PPR-PFS files (default),
                                         --raw keeps files compressed, --cnt/--si add
                                         the CNT entries / debug SI ZIP
+          fpkg extract <file.pkg> <dir> --rebuild-source [--passcode <32>]
+                                        CNT entries only, written back to the sce_sys/
+                                        paths a rebuild reads them from, with the
+                                        container-generated and derived entries dropped.
+                                        Never opens the inner PFS.
+          fpkg template <file.pkg> <dir> [--passcode <32>]
+                                        export a rebuildable additional-content template:
+                                        the sce_sys inputs plus a GP5 project. Data-bearing
+                                        AC packages only; the payload is NOT exported.
           fpkg build --source <dir> --out <dir> [options]
 
         build options
@@ -109,16 +127,40 @@ internal static class Program
                                   matching the GUI; needs the A53 PPR read selector on
                                   the console. Use Native for publisher-compatible output.)
           --format <name>         DebugImage | MetadataContainer | RetailImage (default DebugImage)
-          --playgo <1-64>         generated PlayGo chunk count (library default: 64;
-                                  pass 1 for the verified publisher nwonly profile)
+          --playgo <1-255>        generated PlayGo chunk count (library default: 100 as of
+                                  0.6.6, was 64; pass 1 for the verified publisher nwonly
+                                  profile). Ignored when the source carries playgo-chunk.dat
+                                  or playgo-scenario.json, or when a GP5 declares chunk_info.
+                                  Refused when the source has fewer 64 KiB blocks than
+                                  chunks: upstream dropped that check in 0.6.6 and now
+                                  silently emits zero-length chunk extents.
+          --playgo-languages <l>  comma-separated PlayGo language codes, or "all" (default all)
+                                  Also picks the default language written into
+                                  playgo-chunk.dat: en-US when present, else the first set.
+          --app-drm <free|standard>
+                                  applicationDrmType for an Application volume (default free,
+                                  matching the 0.6.7 GUI). free sets drm_type 0 and emits no
+                                  debug licence; standard sets drm_type 16 and generates one
+                                  when the source has none.
+          --ac-drm <free|entitlement>
+                                  applicationDrmType for AdditionalContentData (default free).
+                                  free also OMITS license.dat and license.info entirely - one
+                                  library predicate drives drm_type and the licence together.
           --compress              store the inner pfs_image.dat PFSC-compressed
           --temp-dir <dir>        holds the intermediate CNT/inner/outer images
                                   (default: the OS temp dir; must be outside --source)
-          --sdk-version <n|0xHEX> SDK to stamp: a major generation (1-11, resolved to
-                                  that release's canonical value) or a full 64-bit
-                                  executable identifier. Rewrites the .sceversion
-                                  trailer in SELF binaries; param.json gets the
-                                  canonical major/minor form. Omit to keep the source's.
+          --sdk-version <n|0xHEX|keep>
+                                  SDK to stamp: a major generation (1-11, resolved to that
+                                  release's canonical value) or a full 64-bit executable
+                                  identifier.                                  (default 1)
+                                  Rewrites the .sceversion trailer in SELF binaries;
+                                  param.json gets the canonical major/minor form.
+                                  "keep" leaves the source's own values alone.
+                                  Since 0.6.7 this no longer moves
+                                  requiredSystemSoftwareVersion in either direction: 0.6.4
+                                  clamped it to 9.00 and floored it at the SDK, 0.6.6 kept
+                                  the floor, 0.6.7 passes param.json through untouched
+                                  (and writes 0x0 when the field is absent).
           --kraken-backend <name> Auto | Oodle | BuiltIn | Automatic |
                                   Uncompressed                                   (default Auto)
                                   Auto picks Oodle when the native backend is available and
@@ -144,13 +186,18 @@ internal static class Program
           --no-deterministic      allow a random outer-PFS seed (deterministic is the default)
           --no-param-json         do not synthesise a missing param.json
           --no-verify             skip the post-build structural check
-          --retain-param-json     leave sce_sys/param.json exactly as it is. By default the
-                                  build forces "applicationDrmType": "standard", restoring
-                                  the original file afterwards.
           --retain-sce-sys        keep every sce_sys file. By default license.*, playgo-*,
                                   origin-param.json and target-param.json are set aside for
                                   the build and put back afterwards: a retail dump's copies
                                   override what the builder regenerates for the new image.
+                                  Required when building an exported AC template, whose
+                                  licence and playgo files are deliberate inputs.
+          --no-media-repair       pack sce_sys PNGs exactly as they are. By default icon0,
+                                  pic0, pic1 and pic2 .png are validated (signature, chunk
+                                  chain, CRC-32, IEND, no trailing bytes) and a corrupt one
+                                  is set aside so the builder rebuilds it from its .dds;
+                                  icon0 and pic0 have no reverse path upstream, so those two
+                                  are regenerated here. Corrupt with no usable .dds fails.
           --v3                    alias for --pfs-format v3. Like the GUI's "PFS v3", this
                                   alone changes nothing measurable - see --shuffle-analysis.
           --pfs-format <v2|v3>    PFS compression metadata format             (default v2)
@@ -373,11 +420,88 @@ internal static class Program
     private static int Verify(string[] args)
     {
         if (args.Length < 2) return Fail("verify needs a package path");
+        var pkg = Path.GetFullPath(args[1]);
+        // verify has two argument shapes: a bare positional mode ("verify <pkg> PlaintextNoAuth")
+        // and the 0.6.7 flags. ParseFlags rejects any non-"--" argument and skips its own first
+        // element, so hand it the slice starting one BEFORE the first flag; with no flags at all
+        // it must not see the positional mode.
+        var firstFlag = Array.FindIndex(args, a => a.StartsWith("--", StringComparison.Ordinal));
+        var flags = firstFlag < 1
+            ? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            : ParseFlags(args[(firstFlag - 1)..]);
+
+#if LIB_HAS_ARCHIVE_067
+        // Bare `fpkg verify <pkg> [mode]` keeps its original meaning — the structural FIH check
+        // this CLI has always done, and what a build runs on its own output. --quick and --full
+        // are opt-in routes to the library's own verifiers, added in 0.6.7.
+        if (flags.ContainsKey("quick") || flags.ContainsKey("full"))
+        {
+            var passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
+            var full = flags.ContainsKey("full");
+            var workers = flags.TryGetValue("workers", out var w) && int.TryParse(w, out var n) ? n : 0;
+
+            using var cancellation = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
+
+            Console.WriteLine($"Package: {pkg}");
+            Console.WriteLine($"Mode:    {(full ? "full" : "quick")}\n");
+            var result = full
+                ? ProsperoPackageArchive.VerifyPackageFull(
+                      pkg, passcode, cancellation.Token, null, line => Console.WriteLine($"  {line}"), workers)
+                : ProsperoPackageArchive.VerifyPackageQuick(
+                      pkg, passcode, cancellation.Token, null, line => Console.WriteLine($"  {line}"));
+
+            Console.WriteLine();
+            foreach (var check in result.Checks) Console.WriteLine($"  ok: {check}");
+            foreach (var issue in result.Issues) Console.WriteLine($"  ISSUE: {issue}");
+            Console.WriteLine($"\n{result.Issues.Count} issue(s)");
+            return result.Issues.Count == 0 ? 0 : 1;
+        }
+#else
+        foreach (var unsupported in new[] { "quick", "full", "workers" })
+            if (flags.ContainsKey(unsupported))
+                return Fail($"--{unsupported} needs LibProsperoPkg 0.6.7 or newer");
+#endif
+
         var expectPlaintextMarker = args.Length > 2 &&
             args[2].Equals("PlaintextNoAuth", StringComparison.OrdinalIgnoreCase);
-        VerifyOutput(Path.GetFullPath(args[1]), expectPlaintextMarker);
+        VerifyOutput(pkg, expectPlaintextMarker);
         return 0;
     }
+
+#if LIB_HAS_ARCHIVE_067
+    /// <summary>
+    /// Exports the CNT inputs needed to rebuild a data-bearing AC package, plus a GP5 project
+    /// rooted at the exported folder. The inner-PFS payload is deliberately NOT exported — an AC
+    /// package keeps its whole sce_sys in the CNT, so the CNT entries are the complete non-payload
+    /// input and the data tree is yours to supply.
+    /// </summary>
+    private static int Template(string[] args)
+    {
+        if (args.Length < 3) return Fail("template needs a package path and an output directory");
+        var pkg = Path.GetFullPath(args[1]);
+        var outDir = Path.GetFullPath(args[2]);
+        if (!File.Exists(pkg)) return Fail($"no such file: {pkg}");
+        var flags = ParseFlags(args.Skip(2).ToArray());
+        var passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
+
+        using var cancellation = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
+
+        Console.WriteLine($"Package: {pkg}");
+        Console.WriteLine($"Output:  {outDir}\n");
+        var files = ProsperoPackageArchive.ExportAdditionalContentTemplate(
+            pkg, outDir, passcode, cancellation.Token, null, name => Console.WriteLine($"  {name}"));
+
+        Console.WriteLine($"\n{files.Count} file(s) exported.");
+        Console.WriteLine(
+            "The inner-PFS payload is not part of a template: copy your own data tree into this\n" +
+            "folder, then build it with --gp5 <the .gp5> --retain-sce-sys. The exported\n" +
+            "license.info carries the entitlement key and playgo-chunk.dat carries the chunk,\n" +
+            "scenario and language counts, which is why the sce_sys sweep has to stay off.");
+        return 0;
+    }
+#endif
 
     private static int Extract(string[] args)
     {
@@ -391,6 +515,23 @@ internal static class Program
 
         Console.WriteLine($"Package: {pkg}");
         Console.WriteLine($"Type:    {ProsperoPkgReader.DetectType(pkg)}");
+
+#if LIB_HAS_ARCHIVE_067
+        // CNT entries only, mapped back to the sce_sys/ paths a rebuild would read them from,
+        // with the container-generated and derived entries dropped. The inner PFS is never
+        // opened, so this is fast even on a large package.
+        if (flags.ContainsKey("rebuild-source"))
+        {
+            var rebuild = ProsperoPackageArchive.ExtractRebuildSourceFiles(
+                pkg, Path.Combine(outDir, "source"), passcode, default, null,
+                name => Console.WriteLine($"  {name}"));
+            Console.WriteLine($"\n{rebuild.Count} rebuild-source file(s) — payload not included.");
+            return 0;
+        }
+#else
+        if (flags.ContainsKey("rebuild-source"))
+            return Fail("--rebuild-source needs LibProsperoPkg 0.6.7 or newer");
+#endif
 
         var inner = LibProsperoPkg.PKG.ProsperoPackageArchive.ExtractInnerFiles(
             pkg, Path.Combine(outDir, "inner"), passcode, !flags.ContainsKey("raw"));
@@ -497,10 +638,68 @@ internal static class Program
         // Left unset, the library's own default applies (64 as of 0.4). Pass --playgo 1 for the
         // verified publisher nwonly profile; the docs still call anything above one experimental.
         int? playGo = flags.TryGetValue("playgo", out var playGoText) ? int.Parse(playGoText!) : null;
-        if (playGo is < 1 or > 64) return Fail("--playgo must be between 1 and 64");
+        // 1..255 since 0.6.6 (the GUI's spinner maximum went 64 -> 255 in the same release);
+        // ProsperoPlayGo.BuildMultiChunkDat enforces the same range.
+        if (playGo is < 1 or > 255) return Fail("--playgo must be between 1 and 255");
 #if !LIB_HAS_PLAYGO_COUNT
         if (flags.ContainsKey("playgo"))
             return Fail("--playgo needs a library with ProsperoBuildOptions.PlayGoChunkCount; this binary was built against an older release");
+#endif
+
+        // applicationDrmType for an Application volume. Defaults to "free", matching the 0.6.7
+        // GUI. Until 0.6.6 the library had no override at all and this CLI rewrote param.json on
+        // disk to force "standard"; that whole mechanism is gone.
+        ProsperoApplicationDrmType appDrm;
+        {
+            var text = flags.GetValueOrDefault("app-drm", "free")!;
+            if (!Enum.TryParse(text, ignoreCase: true, out appDrm)
+                || !Enum.IsDefined(appDrm)
+                || appDrm is not (ProsperoApplicationDrmType.Free or ProsperoApplicationDrmType.Standard))
+                return Fail($"--app-drm must be free or standard: {text}");
+        }
+        // applicationDrmType for a data-bearing additional-content volume. "free" also omits
+        // license.dat / license.info entirely — one library predicate drives drm_type and the
+        // licence emission together.
+        ProsperoAdditionalContentDrmType acDrm;
+        {
+            var text = flags.GetValueOrDefault("ac-drm", "free")!;
+            if (!Enum.TryParse(text, ignoreCase: true, out acDrm) || !Enum.IsDefined(acDrm))
+                return Fail($"--ac-drm must be free or entitlement: {text}");
+        }
+#if !LIB_HAS_APP_DRM
+        if (flags.ContainsKey("app-drm"))
+            return Fail("--app-drm needs LibProsperoPkg 0.6.6 or newer");
+#endif
+#if !LIB_HAS_AC_DRM
+        if (flags.ContainsKey("ac-drm"))
+            return Fail("--ac-drm needs LibProsperoPkg 0.6.7 or newer");
+#endif
+
+        // PlayGo supported-language mask. Default ulong.MaxValue = every language, matching the
+        // library and the GUI. The mask also picks the default language written at offset 0x24
+        // of playgo-chunk.dat, so narrowing it changes more than one field.
+        ulong playGoLanguages = ulong.MaxValue;
+#if LIB_HAS_PLAYGO_LANGUAGES
+        if (flags.TryGetValue("playgo-languages", out var langText) && !string.IsNullOrWhiteSpace(langText)
+            && !langText.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            var supported = LibProsperoPkg.PlayGo.ProsperoPlayGoLanguages.Supported;
+            ulong mask = 0;
+            foreach (var code in langText.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                // Language is a record struct, so FirstOrDefault yields a zeroed value rather
+                // than null; test membership first, exactly as the --sdk-version path does for
+                // ProsperoSdkRelease.
+                if (!supported.Any(l => string.Equals(l.Code, code, StringComparison.OrdinalIgnoreCase)))
+                    return Fail($"unknown PlayGo language '{code}'; known: {string.Join(", ", supported.Select(l => l.Code))}");
+                mask |= supported.First(l => string.Equals(l.Code, code, StringComparison.OrdinalIgnoreCase)).Mask;
+            }
+            if (mask == 0) return Fail("--playgo-languages selected no languages");
+            playGoLanguages = mask;
+        }
+#else
+        if (flags.ContainsKey("playgo-languages"))
+            return Fail("--playgo-languages needs LibProsperoPkg 0.6.6 or newer");
 #endif
 
         // Parsed here, defaulted later: the default depends on which backend actually
@@ -565,7 +764,14 @@ internal static class Program
 #endif
 #if LIB_HAS_SDK_VERSIONS
         ulong? sdkVersion = null;
-        if (flags.TryGetValue("sdk-version", out var sdkText) && !string.IsNullOrWhiteSpace(sdkText))
+        // Default "1", matching the 0.6.7 GUI's SDK combo (index 1 = SDK 1.00). 0.6.6 briefly
+        // defaulted to Auto; 0.6.7 reverted. "keep" is this CLI's escape hatch for leaving the
+        // source's own sdkVersion and .sceversion trailers alone — the GUI has no equivalent
+        // because its Auto entry (index 0) does exactly that.
+        var sdkText = flags.GetValueOrDefault("sdk-version", "1");
+        if (!string.IsNullOrWhiteSpace(sdkText)
+            && !sdkText.Equals("keep", StringComparison.OrdinalIgnoreCase)
+            && !sdkText.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
             if (sdkText.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
             {
@@ -690,10 +896,26 @@ internal static class Program
 #if LIB_HAS_PLAYGO_COUNT
             PlayGoChunkCount = playGo ?? new ProsperoBuildOptions().PlayGoChunkCount,
 #endif
+#if LIB_HAS_PLAYGO_LANGUAGES
+            PlayGoLanguageMask = playGoLanguages,
+#endif
             CompressInnerImage = flags.ContainsKey("compress"),
             DeterministicBuild = !flags.ContainsKey("no-deterministic"),
             GenerateParamJsonIfMissing = !flags.ContainsKey("no-param-json"),
         };
+
+        // Both overrides are volume-scoped in the library: it reads ApplicationDrmTypeOverride
+        // only for Application and AdditionalContentDrmTypeOverride only for
+        // AdditionalContentData. Setting the irrelevant one is harmless but misleading in the
+        // log, so only the applicable one is assigned.
+#if LIB_HAS_APP_DRM
+        if (options.Mode == ProsperoPackageMode.Application)
+            options.ApplicationDrmTypeOverride = appDrm;
+#endif
+#if LIB_HAS_AC_DRM
+        if (options.Mode == ProsperoPackageMode.AdditionalContentData)
+            options.AdditionalContentDrmTypeOverride = acDrm;
+#endif
 
 #if LIB_HAS_BUILD_TUNING
         options.TemporaryDirectory = tempDir;
@@ -719,7 +941,12 @@ internal static class Program
         Console.WriteLine(meta.ContentId is null
             ? "Metadata: sce_sys/param.json not found — a minimal one will be generated."
             : $"Metadata loaded: {meta.ContentId}{(string.IsNullOrWhiteSpace(meta.Title) ? "" : $" — {meta.Title}")}");
-        Console.WriteLine(PlayGoStatus(source, options.PlayGoChunkCount));
+        Console.WriteLine(PlayGoStatus(source, options.PlayGoChunkCount, gp5Path));
+        // Only meaningful when the count actually comes from the flag; when the source or a GP5
+        // supplies it, PlayGoChunkCount is never consulted and checking it rejects good builds.
+        if (PlayGoCountComesFromFlag(source, gp5Path)
+            && PlayGoChunkCountProblem(source, options.PlayGoChunkCount) is string chunkProblem)
+            return Fail(chunkProblem);
 #if LIB_HAS_IMAGE_MODE
         Console.WriteLine($"Building {options.Mode} / {options.OutputFormat} / image={imageMode}");
 #else
@@ -736,6 +963,29 @@ internal static class Program
 #if LIB_HAS_KRAKEN_BACKEND
         Console.WriteLine($"  kraken backend: {krakenBackend}");
 #endif
+#if LIB_HAS_APP_DRM
+        if (options.Mode == ProsperoPackageMode.Application)
+            Console.WriteLine($"  drm:    applicationDrmType {appDrm.ToString().ToLowerInvariant()}" +
+                              (appDrm == ProsperoApplicationDrmType.Free
+                                  ? " (drm_type 0; no debug licence is emitted)"
+                                  : " (drm_type 16; a debug licence is generated when the source has none)"));
+#endif
+#if LIB_HAS_AC_DRM
+        if (options.Mode == ProsperoPackageMode.AdditionalContentData)
+            Console.WriteLine($"  drm:    additional-content {acDrm.ToString().ToLowerInvariant()}" +
+                              (acDrm == ProsperoAdditionalContentDrmType.Free
+                                  ? " (drm_type 0; license.dat and license.info are OMITTED)"
+                                  : " (drm_type 16; a debug licence is generated when the source has none)"));
+#endif
+#if LIB_HAS_PLAYGO_LANGUAGES
+        if (playGoLanguages != ulong.MaxValue)
+        {
+            var picked = LibProsperoPkg.PlayGo.ProsperoPlayGoLanguages.Supported
+                .Where(l => (l.Mask & playGoLanguages) != 0).Select(l => l.Code).ToArray();
+            Console.WriteLine($"  playgo languages: {picked.Length} ({string.Join(" ", picked)}), " +
+                              $"default {LibProsperoPkg.PlayGo.ProsperoPlayGoLanguages.DefaultLanguage(playGoLanguages).Code}");
+        }
+#endif
 #if LIB_HAS_SHA3_DIAGNOSTICS
         Console.WriteLine($"  sha3:   {LibProsperoPkg.Util.ProsperoSha3.BackendName}");
 #endif
@@ -747,12 +997,19 @@ internal static class Program
 
         var quiet = flags.ContainsKey("quiet");
 
-        // Force applicationDrmType=standard unless asked not to. Recover first, so an
-        // interrupted previous run cannot leave a patched param.json in place.
-        DrmTypePatch.RecoverAbandoned(tempDir, source, recoveryKey);
-        using var drmPatch = flags.ContainsKey("retain-param-json")
-            ? null
-            : DrmTypePatch.Apply(tempDir, source, recoveryKey);
+        // An AC template exported by `fpkg template` (or the 0.6.7 GUI) is the one source tree
+        // where the quarantine is exactly wrong: the export deliberately keeps license.dat /
+        // license.info, because that is where the entitlement key lives, and playgo-chunk.dat /
+        // playgo-scenario.json, because that is where the chunk, scenario and language counts
+        // live. Sweeping them would delete the very files that make it a template. Refuse rather
+        // than silently changing behaviour based on folder contents — the --playgo trap is what
+        // that looks like when it goes wrong.
+        if (!flags.ContainsKey("retain-sce-sys") && LooksLikeExportedTemplate(source))
+            return Fail(
+                "this source looks like an exported additional-content template (a top-level .gp5 " +
+                "beside sce_sys/license.info and sce_sys/playgo-chunk.dat). Those files are the " +
+                "template's entitlement key and PlayGo counts, and the default sce_sys sweep would " +
+                "remove them. Re-run with --retain-sce-sys.");
 
         // Sweep aside the sce_sys files a retail dump carries that would otherwise override
         // what the builder regenerates for the new image.
@@ -760,6 +1017,13 @@ internal static class Program
         using var sceSysQuarantine = flags.ContainsKey("retain-sce-sys")
             ? null
             : SceSysQuarantine.Apply(tempDir, source, recoveryKey);
+
+        // Runs after the quarantine: the sweep can remove files this would otherwise inspect,
+        // and a regenerated icon0.png must not then be swept.
+        MediaRepair.RecoverAbandoned(tempDir, source, recoveryKey);
+        using var mediaRepair = flags.ContainsKey("no-media-repair")
+            ? null
+            : MediaRepair.Apply(tempDir, source, recoveryKey);
 
         var result = ProsperoPackageBuilder.Build(options, quiet ? null : line => Console.WriteLine($"  {line}"));
 
@@ -850,110 +1114,6 @@ internal static class Program
         Console.WriteLine($"  sha256:      {sha}");
     }
 
-    /// <summary>
-    /// Forces <c>"applicationDrmType": "standard"</c> for the duration of one build.
-    ///
-    /// The builder only ever reads param.json from the source folder, so there is no way to
-    /// substitute it in memory. Cloning the tree was rejected because a source may sit on exFAT
-    /// or another filesystem without clonefile, so the file is edited in place and restored in a
-    /// finally block. A stale backup left by a killed process is recovered on the next run.
-    ///
-    /// The edit is textual, so key order, indentation and every other byte are preserved.
-    /// </summary>
-    private sealed class DrmTypePatch : IDisposable
-    {
-        // The backup must NOT live in the source tree: the builder walks that tree and would
-        // pack the backup into the image as an extra sce_sys file.
-        //
-        // Keyed on recoveryKey — the ORIGINAL --source argument — rather than the folder being
-        // edited. For a folder source the two are the same string. For a container source the
-        // folder is <temp-dir>/fpkg-vsrc-<random handle>, which is a different name on every
-        // run, so keying on it would make the name unrecoverable by construction.
-        private static string BackupFor(string backupDirectory, string recoveryKey)
-        {
-            byte[] key = System.Security.Cryptography.SHA256.HashData(
-                Encoding.UTF8.GetBytes(Path.GetFullPath(recoveryKey)));
-            return Path.Combine(backupDirectory, $"fpkg-parambak-{Convert.ToHexString(key)[..16]}.json");
-        }
-        private static readonly Regex DrmTypeField = new(
-            "(\"applicationDrmType\"\\s*:\\s*\")([^\"]*)(\")",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        private readonly string? paramPath;
-        private readonly string? backupPath;
-
-        private DrmTypePatch(string? paramPath, string? backupPath)
-        {
-            this.paramPath = paramPath;
-            this.backupPath = backupPath;
-        }
-
-        /// <summary>Restores a backup abandoned by an interrupted build.</summary>
-        internal static void RecoverAbandoned(string backupDirectory, string sourceFolder, string recoveryKey)
-        {
-            string param = Path.Combine(sourceFolder, "sce_sys", "param.json");
-            string backup = BackupFor(backupDirectory, recoveryKey);
-            if (!File.Exists(backup) || !File.Exists(param)) return;
-            File.Copy(backup, param, overwrite: true);
-            File.Delete(backup);
-            Console.WriteLine("  note:   restored sce_sys/param.json from an interrupted build");
-        }
-
-        internal static DrmTypePatch Apply(string backupDirectory, string sourceFolder, string recoveryKey)
-        {
-            string param = Path.Combine(sourceFolder, "sce_sys", "param.json");
-            if (!File.Exists(param))
-                throw new RenamerLikeError(
-                    "sce_sys/param.json is missing, so \"applicationDrmType\" cannot be forced to " +
-                    "\"standard\". Add a param.json, or pass --retain-param-json to build without it.");
-
-            string original = File.ReadAllText(param);
-            var match = DrmTypeField.Match(original);
-            if (!match.Success)
-                throw new RenamerLikeError(
-                    "sce_sys/param.json has no \"applicationDrmType\" field to force to \"standard\". " +
-                    "Pass --retain-param-json to build it unchanged.");
-            if (match.Groups[2].Value == "standard")
-            {
-                Console.WriteLine("  drm:    applicationDrmType is already \"standard\"");
-                return new DrmTypePatch(null, null);
-            }
-
-            Directory.CreateDirectory(backupDirectory);
-            string backup = BackupFor(backupDirectory, recoveryKey);
-            File.Copy(param, backup, overwrite: true);
-            try
-            {
-                File.WriteAllText(param, DrmTypeField.Replace(original, "${1}standard${3}", 1));
-            }
-            catch (Exception)
-            {
-                File.Copy(backup, param, overwrite: true);
-                File.Delete(backup);
-                throw;
-            }
-            Console.WriteLine(
-                $"  drm:    applicationDrmType \"{match.Groups[2].Value}\" -> \"standard\" " +
-                "(param.json restored after the build)");
-            return new DrmTypePatch(param, backup);
-        }
-
-        public void Dispose()
-        {
-            if (paramPath is null || backupPath is null) return;
-            try
-            {
-                File.Copy(backupPath, paramPath, overwrite: true);
-                File.Delete(backupPath);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine(
-                    $"warning: could not restore {paramPath}: {ex.Message}. " +
-                    $"The original is still at {backupPath}.");
-            }
-        }
-    }
 
     /// <summary>
     /// Moves the sce_sys files that a retail dump carries but a rebuilt package must not
@@ -1083,6 +1243,204 @@ internal static class Program
                     $"They are still in {quarantine}.");
             }
         }
+    }
+
+    /// <summary>
+    /// Sets aside structurally corrupt sce_sys PNGs so the build does not pack them, and
+    /// regenerates the two the library cannot recover on its own.
+    ///
+    /// 0.6.6 added "restoration of full-screen PNG images if they are missing from the dump",
+    /// but the restore sits in the ELSE of a TryGetValue: it only fires when the PNG is ABSENT,
+    /// and only for pic1.png and pic2.png. A present-but-corrupt file is read with
+    /// File.ReadAllBytes and packed verbatim, unchecked, in every release through 0.6.7.
+    /// Real example: a Control dump whose pic2.png is 532 bytes of high-entropy data with no
+    /// PNG signature at all, sitting next to a perfectly good pic2.dds.
+    ///
+    /// So the fix is to make the file absent. That is enough for pic1/pic2, which the library
+    /// then rebuilds from their DDS. icon0.png and pic0.png have a DDS sibling in DdsMedia but
+    /// are NOT in the library's reverse path, so quarantining them alone would silently drop the
+    /// icon; those two are regenerated here instead, with the same DecodeDdsToPng call the
+    /// library uses for pic1 (preserveAlpha is true only for pic2.png).
+    ///
+    /// Anything corrupt with no usable DDS fails the build rather than shipping a broken image.
+    ///
+    /// The regeneration is done here rather than delegated to the library even for pic1/pic2,
+    /// because ProsperoDdsEncoder.DecodeDdsToPng decodes the DDS with BCnEncoder (managed) but
+    /// then encodes the PNG with Magick.NET, whose native half ships only as
+    /// runtimes/win-x64/native/Magick.Native-Q8-x64.dll. Off Windows its type initializer throws,
+    /// so the library's own "restore pic1/pic2 when missing" path turns a missing image into a
+    /// failed build instead of a restored one. BcDecoder alone is cross-platform, and PNG
+    /// encoding is a zlib stream plus three chunks, so both halves are done in managed code and
+    /// the Magick dependency never comes up. That also means a merely MISSING pic1/pic2 is filled
+    /// in here, pre-empting the library path entirely.
+    /// </summary>
+    private sealed class MediaRepair : IDisposable
+    {
+        // Every sce_sys PNG the library will pack as a CNT entry that also has a DDS sibling.
+        // save_data.png and the icon0_NN.png variants have no DDS and so are validated but never
+        // regenerated; they are not listed here because a missing one is not recoverable anyway.
+        private static readonly string[] Checked = ["icon0.png", "pic0.png", "pic1.png", "pic2.png"];
+
+        // The two the library rebuilds by itself, given the DDS. Quarantining is sufficient.
+        private static readonly string[] LibraryRestores = ["pic1.png", "pic2.png"];
+
+        private static string FolderFor(string backupDirectory, string recoveryKey)
+        {
+            byte[] key = System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(Path.GetFullPath(recoveryKey)));
+            return Path.Combine(backupDirectory, $"fpkg-media-{Convert.ToHexString(key)[..16]}");
+        }
+
+        private readonly string sceSys;
+        private readonly string folder;
+        private readonly List<string> generated;
+        private readonly bool active;
+
+        private MediaRepair(string sceSys, string folder, List<string> generated, bool active)
+        {
+            this.sceSys = sceSys;
+            this.folder = folder;
+            this.generated = generated;
+            this.active = active;
+        }
+
+        /// <summary>Puts back anything an interrupted build left set aside.</summary>
+        internal static void RecoverAbandoned(string backupDirectory, string sourceFolder, string recoveryKey)
+        {
+            string folder = FolderFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(folder)) return;
+            string sceSys = Path.Combine(sourceFolder, "sce_sys");
+            int restored = 0;
+            foreach (string path in Directory.EnumerateFiles(folder))
+            {
+                string target = Path.Combine(sceSys, Path.GetFileName(path));
+                try { File.Move(path, target, overwrite: true); restored++; }
+                catch (Exception ex) { Console.Error.WriteLine($"warning: could not restore {target}: {ex.Message}"); }
+            }
+            if (restored > 0)
+                Console.WriteLine($"  note:   restored {restored} sce_sys image(s) from an interrupted build");
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+        }
+
+        internal static MediaRepair Apply(string backupDirectory, string sourceFolder, string recoveryKey)
+        {
+            string sceSys = Path.Combine(sourceFolder, "sce_sys");
+            string folder = FolderFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(sceSys)) return new MediaRepair(sceSys, folder, [], active: false);
+
+            // (name, path, reason, present). A missing pic1/pic2 is "repairable" too: leaving it
+            // absent hands the library its Magick-backed restore, which throws off Windows.
+            var work = new List<(string Name, string Path, string Reason, bool Present)>();
+            foreach (string name in Checked)
+            {
+                string path = Path.Combine(sceSys, name);
+                if (File.Exists(path))
+                {
+                    if (PngCodec.IsValid(path, out string reason)) continue;
+                    work.Add((name, path, reason, true));
+                }
+                else if (LibraryRestores.Contains(name, StringComparer.OrdinalIgnoreCase)
+                         && File.Exists(Path.Combine(sceSys, Path.ChangeExtension(name, ".dds"))))
+                {
+                    // Only when there is actually a DDS to build from. A source with no pic1 and
+                    // no pic1.dds simply has no pic1 — the library skips it and so do we; it is
+                    // not a defect to report, let alone to fail on.
+                    work.Add((name, path, "missing", false));
+                }
+            }
+            if (work.Count == 0) return new MediaRepair(sceSys, folder, [], active: false);
+
+            // Refuse before touching anything if any of them has no way back.
+            var unrecoverable = work
+                .Where(c => !File.Exists(Path.Combine(sceSys, Path.ChangeExtension(c.Name, ".dds"))))
+                .ToList();
+            if (unrecoverable.Count > 0)
+                throw new RenamerLikeError(
+                    "corrupt sce_sys image(s) with no DDS to rebuild from: " +
+                    string.Join("; ", unrecoverable.Select(c => $"{c.Name} ({c.Reason})")) +
+                    ". Replace them in the source, or pass --no-media-repair to pack them as they are.");
+
+            Directory.CreateDirectory(folder);
+            var generated = new List<string>();
+            var moved = new List<string>();
+            try
+            {
+                foreach (var (name, path, reason, present) in work)
+                {
+                    if (present)
+                    {
+                        File.Move(path, Path.Combine(folder, name), overwrite: true);
+                        moved.Add(name);
+                    }
+                    string dds = Path.Combine(sceSys, Path.ChangeExtension(name, ".dds"));
+                    // preserveAlpha mirrors the library: RGBA for pic2.png, RGB for the rest.
+                    byte[] png = DdsToPng(File.ReadAllBytes(dds),
+                                          preserveAlpha: name.Equals("pic2.png", StringComparison.OrdinalIgnoreCase));
+                    File.WriteAllBytes(path, png);
+                    generated.Add(name);
+                    Console.WriteLine($"  media:  {name} is {reason}; regenerated {png.Length:N0} bytes from {Path.GetFileName(dds)}");
+                }
+            }
+            catch (Exception)
+            {
+                foreach (string name in generated) TryDeleteQuietly(Path.Combine(sceSys, name));
+                foreach (string name in moved)
+                {
+                    try { File.Move(Path.Combine(folder, name), Path.Combine(sceSys, name), overwrite: true); }
+                    catch (Exception ex) { Console.Error.WriteLine($"warning: could not restore {name}: {ex.Message}"); }
+                }
+                throw;
+            }
+            return new MediaRepair(sceSys, folder, generated, active: true);
+        }
+
+        /// <summary>
+        /// BCnEncoder for the DDS half (managed, cross-platform) and <see cref="PngCodec"/> for
+        /// the other, so nothing here touches Magick.NET's win-x64 native library.
+        /// </summary>
+        private static byte[] DdsToPng(byte[] dds, bool preserveAlpha)
+        {
+            if (dds.Length < 128 || !dds.AsSpan(0, 4).SequenceEqual("DDS "u8))
+                throw new InvalidDataException("Invalid DDS header.");
+            using var input = new MemoryStream(dds, writable: false);
+            var decoded = new BCnEncoder.Decoder.BcDecoder().Decode2D(input);
+            int width = decoded.Width, height = decoded.Height;
+            int channels = preserveAlpha ? 4 : 3;
+
+            var pixels = new byte[checked(width * height * channels)];
+            int w = 0;
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
+                {
+                    var c = decoded.Span[y, x];
+                    pixels[w++] = c.r; pixels[w++] = c.g; pixels[w++] = c.b;
+                    if (preserveAlpha) pixels[w++] = c.a;
+                }
+            return PngCodec.Encode(width, height, pixels, preserveAlpha);
+        }
+
+        public void Dispose()
+        {
+            if (!active) return;
+            // Drop our generated stand-ins first, so moving the originals back cannot be blocked
+            // by a file we put there.
+            foreach (string name in generated) TryDeleteQuietly(Path.Combine(sceSys, name));
+            int restored = 0;
+            foreach (string path in Directory.EnumerateFiles(folder))
+            {
+                string target = Path.Combine(sceSys, Path.GetFileName(path));
+                try { File.Move(path, target, overwrite: true); restored++; }
+                catch (Exception ex) { Console.Error.WriteLine($"warning: could not restore {target}: {ex.Message}"); }
+            }
+            if (restored > 0) Console.WriteLine($"  media:  restored {restored} original file(s) to the source");
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+        }
+
+        private static void TryDeleteQuietly(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+
     }
 
 #if HAS_VIRTUAL_SOURCE
@@ -1266,15 +1624,118 @@ internal static class Program
         return $"{Math.Clamp(major, 0, 99):00}.{Math.Clamp(minor, 0, 99):00}";
     }
 
-    private static string PlayGoStatus(string source, int chunks)
+    /// <summary>
+    /// Describes which rung of the library's chunk-count precedence a build will actually land
+    /// on. 0.6.7 made that three deep, where it used to be two:
+    ///
+    ///   1. sce_sys/playgo-chunk.dat and/or playgo-scenario.json  (ProsperoPlayGo.ReadSourceCounts)
+    ///   2. the GP5 project's &lt;chunk_info chunk_count= scenario_count=&gt;   (new in 0.6.7)
+    ///   3. the fallback count, i.e. --playgo or the library default
+    ///
+    /// Rung 1 is why --playgo looks like it does nothing on a retail dump; the quarantine sweeps
+    /// those files aside precisely so the flag reaches rung 3.
+    /// </summary>
+    /// <summary>
+    /// True when the chunk count actually comes from <c>--playgo</c> (or the library default)
+    /// rather than from the source or a GP5 — i.e. the build lands on rung 3. Shared by the
+    /// status line and the zero-extent guard so the two cannot disagree, which they did: the
+    /// guard was rejecting a fallback count the build was never going to use.
+    /// </summary>
+    private static bool PlayGoCountComesFromFlag(string source, string? gp5Path)
+    {
+        var sceSys = Path.Combine(source, "sce_sys");
+        if (File.Exists(Path.Combine(sceSys, "playgo-chunk.dat"))) return false;
+        if (File.Exists(Path.Combine(sceSys, "playgo-scenario.json"))) return false;
+        return gp5Path is null || !Gp5DeclaresChunkInfo(gp5Path, out _, out _);
+    }
+
+    private static string PlayGoStatus(string source, int chunks, string? gp5Path)
     {
         var present = PlayGoFiles.Where(n => File.Exists(Path.Combine(source, "sce_sys", n))).ToArray();
+        if (!PlayGoCountComesFromFlag(source, gp5Path))
+        {
+            if (present.Length == PlayGoFiles.Length)
+                return "PlayGo: all three prepared files found — the builder will preserve their own layout.";
+            if (File.Exists(Path.Combine(source, "sce_sys", "playgo-chunk.dat")))
+                return "PlayGo: the source's playgo-chunk.dat supplies the chunk and scenario counts; --playgo is ignored.";
+            if (File.Exists(Path.Combine(source, "sce_sys", "playgo-scenario.json")))
+                return "PlayGo: the source's playgo-scenario.json supplies the counts; --playgo is ignored.";
+            Gp5DeclaresChunkInfo(gp5Path!, out var gc, out var gs);
+            return $"PlayGo: counts taken from the GP5 project — {gc} chunk(s) / {gs} scenario(s); --playgo is ignored.";
+        }
         if (present.Length == 0)
             return $"PlayGo: automatic layout — 1 scenario / {chunks} chunk(s); no separate files required.";
-        if (present.Length == PlayGoFiles.Length)
-            return "PlayGo: all three prepared files found — the builder will preserve their own layout.";
         var missing = string.Join(", ", PlayGoFiles.Except(present, StringComparer.OrdinalIgnoreCase));
         return $"PlayGo: incomplete set found; these will be generated: {missing}";
+    }
+
+    /// <summary>
+    /// Reads a GP5's chunk_info without pulling in the library's XML deserialiser, so the status
+    /// line works even on a release that predates the GP5 fallback.
+    /// </summary>
+    /// <summary>
+    /// True for the exact shape ExportAdditionalContentTemplate produces: a .gp5 at the top level
+    /// next to a sce_sys/ holding both a licence (the entitlement-key source) and playgo-chunk.dat
+    /// (the count and language-mask source). All three have to be present, so an ordinary dump
+    /// that merely happens to carry a GP5 is not mistaken for one.
+    /// </summary>
+    private static bool LooksLikeExportedTemplate(string source)
+    {
+        if (!Directory.EnumerateFiles(source, "*.gp5", SearchOption.TopDirectoryOnly).Any()) return false;
+        var sceSys = Path.Combine(source, "sce_sys");
+        return File.Exists(Path.Combine(sceSys, "license.info"))
+            && File.Exists(Path.Combine(sceSys, "playgo-chunk.dat"));
+    }
+
+    private static bool Gp5DeclaresChunkInfo(string gp5Path, out int chunks, out int scenarios)
+    {
+        chunks = scenarios = 0;
+        try
+        {
+            var doc = System.Xml.Linq.XDocument.Load(gp5Path);
+            var info = doc.Descendants("chunk_info").FirstOrDefault();
+            if (info is null) return false;
+            return int.TryParse(info.Attribute("chunk_count")?.Value, out chunks)
+                 & int.TryParse(info.Attribute("scenario_count")?.Value, out scenarios);
+        }
+        catch (Exception ex) when (ex is IOException or System.Xml.XmlException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 0.6.4 refused a chunk count the image cannot fill:
+    ///
+    ///   if (blocks &lt; chunkCount) throw "The PlayGo main extent has N blocks and cannot be
+    ///                                      split into M non-empty chunks."
+    ///
+    /// 0.6.6 deleted that guard and 0.6.7 did not restore it, so SplitMainExtent now silently
+    /// hands every chunk past the block count a zero-length main extent. Measured on 0.6.7: a
+    /// 3 MB source (61 blocks of 64 KiB) with the current default of 100 chunks builds clean and
+    /// produces 39 empty chunks. The default moved 64 -> 100 in 0.6.6, so this is easier to hit
+    /// than it was. Re-checked here because the CLI knows the source size before the build.
+    /// </summary>
+    private static string? PlayGoChunkCountProblem(string source, int chunks)
+    {
+        if (chunks <= 1) return null;
+        long bytes;
+        try
+        {
+            bytes = new DirectoryInfo(source)
+                .EnumerateFiles("*", SearchOption.AllDirectories)
+                .Sum(f => f.Length);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;   // can't measure it; let the build proceed rather than guess
+        }
+        var blocks = bytes / 65536;
+        if (blocks >= chunks) return null;
+        return $"--playgo {chunks} exceeds what this source can fill: {bytes:N0} bytes is {blocks} " +
+               $"block(s) of 64 KiB, so {chunks - blocks} chunk(s) would get a zero-length main " +
+               $"extent. Upstream dropped this check in 0.6.6 and builds it anyway. Use --playgo " +
+               $"{Math.Max(1, blocks)} or fewer.";
     }
 
     private static int Api(string[] args)

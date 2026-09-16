@@ -136,17 +136,27 @@ exits 130 and leaves no partial PKG behind.
 
 ### What a build changes in the source folder, and puts back
 
-Two fix-ups are on by default, because a retail dump used as a source otherwise
-produces a package the console refuses to run. Both are reverted in a `finally`
+Three fix-ups are on by default, because a retail dump used as a source otherwise
+produces a package the console refuses to run. All are reverted in a `finally`
 block, and a run killed mid-build is repaired on the next one.
 
-- **`applicationDrmType` is forced to `"standard"`.** Left at `"upgradable"`, the
-  library stamps `drm_type = 16` and content flag `0x08000000` into the CNT, and
-  skips generating a debug licence — that is the lock. `param.json` is edited
-  textually (key order and every other byte preserved) and restored afterwards;
-  the backup lives in the temp dir, keyed by a hash of the source path, *never*
-  in the source tree. `--retain-param-json` opts out. Upstream's release notes claim
-  the library started doing this itself; it does not — see "Upstream 0.6.3 / 0.6.4".
+- **`applicationDrmType` comes from a build option, not an edit.** Until 0.6.5 the
+  library had no override — no `ApplicationDrmTypeOverride`, no
+  `ForceStandardApplicationDrm` — so this CLI rewrote `param.json` textually and
+  restored it. 0.6.6 added `ApplicationDrmTypeOverride`, 0.6.7 added
+  `AdditionalContentDrmTypeOverride`, and the whole `DrmTypePatch` class is gone
+  along with `--retain-param-json`. `--app-drm` defaults to `free`, matching the
+  0.6.7 GUI's combo. One library predicate drives three outputs at once:
+
+  ```csharp
+  bool flag3 = (VolumeType == Application && drm == "free")
+            || (VolumeType == AdditionalContentData && AdditionalContentDrmTypeOverride == Free);
+  drm_type    = flag3 ? 0u : 16u;
+  omitLicense = flag3;                  // and `!omitLicense &&` now guards the generated licence
+  ```
+
+  so `--ac-drm free` emits no `license.dat`/`license.info` at all, where 0.6.4 and
+  0.6.6 always generated one for additional content.
 - **Stale `sce_sys` files are set aside.** `license.*`, `playgo-*`,
   `origin-param.json` and `target-param.json` are moved into the temp dir for the
   duration of the build and moved back after. A dump's `license.dat`/`.info`
@@ -154,6 +164,18 @@ block, and a run killed mid-build is repaired on the next one.
   layout and win over the ones regenerated for the new PFS; `origin-param.json`
   and `target-param.json` are not CNT entries at all and ride into the inner PFS
   as loose files. `--retain-sce-sys` opts out.
+
+  The one source tree where this is *wrong* is an AC template exported by
+  `fpkg template`: that export deliberately keeps `license.info` (the entitlement
+  key) and `playgo-chunk.dat`/`playgo-scenario.json` (the counts and language
+  mask) as rebuild inputs. `LooksLikeExportedTemplate` detects the shape and
+  refuses, rather than silently changing behaviour based on folder contents.
+- **Corrupt `sce_sys` PNGs are regenerated from their `.dds`.** `icon0.png`,
+  `pic0.png`, `pic1.png` and `pic2.png` are validated structurally — signature,
+  IHDR first, the whole chunk chain with declared lengths and CRC-32, `IEND`, no
+  trailing bytes — and any that fail are moved aside and rebuilt. `--no-media-repair`
+  opts out; a failure with no usable `.dds` stops the build. See
+  "sce_sys PNG repair" below for why this cannot be left to the library.
 
 ### Why `playgo-*` in the source defeats `--playgo`
 
@@ -258,6 +280,193 @@ verified profile.
 
 Not yet exposed by the CLI: `SdkVersionOverride`, `PublishingToolsLibraryPath`.
 
+## Upstream 0.6.6 / 0.6.7
+
+0.6.6 was pulled by Drakmor shortly after release. 0.6.7's notes read: fixed DRM
+and PlayGo issues; fixed the packaging of uncompressed chunks; added unpacking,
+image verification and DLC template export. Independent diff of all three trees
+below; the decompiles were `ilspycmd` over each release's `LibProsperoPkg.dll`.
+
+### The uncompressed-chunk bug, and why it predates 0.6.6
+
+Two coupled defects in how the NAPS `Meta18` table describes the inner-PFS
+**metadata** region when that metadata does not compress.
+
+`BuildInnerBlocks` tagged every metadata block as Kraken-compressed:
+
+```csharp
+// 0.6.4 and 0.6.6
+uint flag4 = ((second != 0) ? 0x40450000u : 0x40050000u);
+// 0.6.7
+bool stored = compressedSize == uncompressedSize;
+uint flag4 = (stored ? 0x40090000u : ((second != 0) ? 0x40450000u : 0x40050000u));
+```
+
+`0x40090000` is the stored flag. The **data**-block path has carried it since
+0.6.4 (`placement.StoreRaw ? 0x40090000u : …`); the metadata path never did.
+
+Worse, when *every* metadata block stays raw, `CompressPayload` returns
+`compressedFile == null`. 0.6.4 and 0.6.6 then set `metaBlocks = Array.Empty<>()`,
+and `BuildInnerBlocks` fell through to a fallback that **re-Kraken-packed the
+metadata at level 7** purely to synthesise a block table — describing compressed
+sizes and offsets for bytes that were never written, because the raw metadata had
+already gone to disk. 0.6.7 builds the table from the raw layout instead.
+
+Both bugs are in 0.6.4. They are data-dependent, which is why they shipped.
+
+### requiredSystemSoftwareVersion: three behaviours in three releases
+
+```
+0.6.4   Math.Max(Math.Min(required, 0x0900…), sdkVersion)    ceiling 9.00, floor sdkVersion
+0.6.6   Math.Max(required, sdkVersion)                       no ceiling, floor sdkVersion
+0.6.7   required passthrough; "0x0000000000000000" if absent no ceiling, no floor
+```
+
+These fields are **BCD**, not plain hex: `0x1270000000000000` is firmware 12.70,
+not 18.x. The 0.6.4 clamp constant `648518346341351424` is `0x0900…`, i.e. 9.00.
+
+The 0.6.6 shape was actively harmful on a backported dump. Measured on a real one
+(Starfield PPSA24884 v1.0.0002, `param.json` requiring 12.70 while its `eboot.bin`
+process-param had been patched down to SDK 10.00.00.40): 0.6.4 with SDK 10 selected
+produced a package requiring firmware 10.00; 0.6.6 produced 12.70 *regardless of the
+SDK chosen*, because the floor could only ever raise it. 0.6.7 decouples them
+entirely — the SDK no longer moves the firmware requirement in either direction, and
+nothing in the library can lower it below what `param.json` declares.
+
+The GUI's SDK combo went index 1 (SDK 1.00) -> Auto in 0.6.6 -> back to index 1 in
+0.6.7. `--sdk-version` defaults to `1` to match; `--sdk-version keep` leaves the
+source's own values alone.
+
+### PlayGo
+
+- New public `ProsperoPlayGo.ReadChunkCounts(ReadOnlySpan<byte>)`, an in-memory
+  `playgo-chunk.dat` reader (validates `plgx`, version 4096, length at `0x10`;
+  1..255 chunks, 1..64 scenarios).
+- `ResolvePlayGoCounts` gained a **third** precedence rung. Was: source files, then
+  the fallback count. Now: source files -> the GP5 project's `<chunk_info>` -> the
+  fallback. `PlayGoStatus()` reports which rung a build will land on.
+- `PlayGoChunkCount` default moved 64 -> 100 in 0.6.6, and the GUI spinner maximum
+  64 -> 255. `--playgo` now accepts 1..255.
+- `SplitMainExtent` lost its guard. 0.6.4 had:
+
+  ```csharp
+  if (blocks < chunkCount)
+      throw new ArgumentOutOfRangeException("chunkCount",
+          $"The PlayGo main extent has {blocks} blocks and cannot be split into {chunkCount} non-empty chunks.");
+  ```
+
+  0.6.6 deleted it; **0.6.7 did not restore it**. Verified on 0.6.7: a 3 MB source
+  (45 blocks of 64 KiB) with the new default of 100 chunks builds clean and silently
+  emits 55 zero-length chunk extents. `PlayGoChunkCountProblem()` re-checks this
+  before the build, since the CLI knows the source size.
+
+### sce_sys PNG repair
+
+Not an upstream feature — ours. 0.6.6 added "restoration of full-screen PNG images
+if they are missing from the dump", but the restore sits in the `else` of a
+`TryGetValue`: it fires only when the PNG is **absent**, and only for `pic1.png`
+and `pic2.png`. A present-but-corrupt file is read with `File.ReadAllBytes` and
+packed unchecked, in every release through 0.6.7. A Control dump
+(PPSA01949 v1.0.0005) has a `pic2.png` that is 532 bytes of high-entropy data with
+no PNG signature, beside a valid `pic2.dds`. That dump also has `origin-param.json`
+containing a PNG, `target-param.json` byte-identical to `pic2.dds`, and
+`playgo-ficm.dat` byte-identical to `param.json` — all three already caught by the
+quarantine's name globs, which is a useful independent check on that list.
+
+The repair is done entirely in our own code, including for pic1/pic2, because
+`ProsperoDdsEncoder.DecodeDdsToPng` decodes the DDS with BCnEncoder (managed) but
+encodes the PNG with **Magick.NET**, whose native half ships only as
+`runtimes/win-x64/native/Magick.Native-Q8-x64.dll`. Off Windows its type
+initializer throws, so the library's own restore path turns a *missing* pic1/pic2
+into a failed build rather than a restored one. `PngCodec` therefore does the
+encoding (zlib plus three chunks) and `MediaRepair` fills in missing pic1/pic2 as
+well as corrupt ones, so the library never reaches that call.
+
+### Additional-content DRM
+
+New `ProsperoAdditionalContentDrmType { Free, Entitlement }` and
+`AdditionalContentDrmTypeOverride`. The `drm_type` test was also inverted: 0.6.6
+keyed off `!= "free"`, 0.6.7 off a single `flag3` covering both volume types. A
+`!omitLicense &&` guard was added to the generated debug licence, so free AC now
+emits none — 0.6.4 and 0.6.6 always did. `param.json` also drops
+`applicationDrmType` for non-Application volumes now.
+
+### Extraction and verification
+
+The bulk of the release (+2,079 library lines) is a read-side subsystem, and it is
+**streaming** — no temp files: `ProsperoNapsImage.OpenRead`, `LogicalReadStream`,
+`DecryptedOuterPfsReadStream`, `PprPfsKraken.Unpack`. `ExtractInnerFiles` /
+`ExtractCntEntries` / `ExtractSiEntries` gained cancellation, progress and per-file
+callbacks; new are `ExtractRebuildSourceFiles`, `ExportAdditionalContentTemplate`,
+`TryReadCntEntry`, `AnalyzeInnerFiles`, `VerifyCntEntryDigests` and parallel
+`VerifyPackageQuick` / `VerifyPackageFull`. `PfsReader.File.CopyTo` now checks the
+PFSC magic and streams version 2 through `PprPfsKraken.Unpack`.
+
+One thing got *looser*: `ProsperoNapsImage.ReadRange` lost its completeness
+assertion (`"NAPS range [0x…,+0x…) has only 0x… decoded bytes."`). A partially
+covered range now returns zero-filled gaps instead of throwing.
+
+### DLC template export
+
+`ExportAdditionalContentTemplate` refuses anything but `ContentType == 33`
+(data-bearing AC) and an empty output folder. It runs `ExtractRebuildSourceFiles`
+— **CNT entries only, the inner PFS is never opened** — then synthesises a GP5.
+
+`RebuildSourcePath` maps entry -> `sce_sys/<name>`, forces id 8192 to
+`sce_sys/param.json`, and drops 16 ids: the container-generated ones (1 `DIGESTS`,
+16 `ENTRY_KEYS`, 32 `IMAGE_KEY`, 128 `GENERAL_DIGESTS`, 256 `METAS`,
+512 `ENTRY_NAMES`), the derived ones (1034 `IMAGEDIGS_DAT`, 4098
+`PLAYGO_CHUNK_SHA`, 4099 `PLAYGO_MANIFEST_XML`, 4105/4106 `APP__*`, 8208
+`PLAYGO_HASH_TABLE_DAT`, 8209 `PLAYGO_FICM_DAT`) and the superseded ones (4096
+`PARAM_SFO`, 4103 `PUBTOOLINFO_DAT`, 4104 `APP__PLAYGO_CHUNK_DAT`).
+
+It deliberately **keeps** `license.dat`/`license.info` and `playgo-chunk.dat`,
+because the GP5 synthesis reads them back:
+
+- `entitlement_key` = hex of `license.info[48..63]`
+- `chunk_info` from `TryReadCntEntry(4097) ?? TryReadCntEntry(4104)` via
+  `ReadChunkCounts`; the language mask is the u64 at **offset 56** of
+  `playgo-chunk.dat`, expanded into `supported_languages` + `default_language`
+- `c_date` from `param.json -> pubtools.creationDate`
+- chunk and scenario labels are placeholders (`"Chunk #N"`, `"Scenario #N"`)
+
+Round-tripped here on a package built with 0.6.7: entitlement key
+`000102030405060708090A0B0C0D0E0F` recovered exactly, rebuild from the template
+verified clean (`VerifyPackageQuick` and `VerifyPackageFull`, 0 issues). Note that
+`ProsperoPackageBuilder.Build` does **not** read the GP5's own `content_id`,
+`passcode` or `entitlement_key` — passing only `SourceMode=Gp5Project` throws
+`ArgumentException: Content ID is not in the format …`. The host lifts them; the
+GUI does this too.
+
+### Emulator-ish files in a dump
+
+Exactly three filenames are special, all in `BuildInnerTree` after the source walk:
+
+| file | 0.6.4 | 0.6.6 / 0.6.7 |
+|---|---|---|
+| `ampr_emu.index` (root only) | kept | **dropped**, logged |
+| `fakelib/libSceAmpr.sprx` | **dropped**, silently | same |
+| `fakelib/libScePlayGo.sprx` | **dropped**, silently | same |
+
+`FilterFakeLibraryDirectory` also normalises the directory name to lowercase
+`fakelib`. **`dlc_emu` has no handling whatsoever** — no string match anywhere in
+the library or the GUI — so it rides into the inner PFS verbatim. Confirmed by
+building with decoys: `ampr/ampr_data.bin`, `ampr_emu.cfg`,
+`fakelib/libSceSomethingElse.sprx` and both `dlc_emu/*` files all survived; the
+three above did not. The `RemoveAll` is on the root dir only, so a nested
+`sub/ampr_emu.index` would survive.
+
+Both filters run *after* the `Populate` our TreeOverlay patch hooks, so container
+(`.ffpfsc`) builds get them too.
+
+### Our patcher needed no change
+
+All seven IL sites resolve on 0.6.7 with the same ordinals as 0.6.6
+(`Populate|39_17`, `IsLooseElf|39_34`, `IsSelf|39_35`,
+`GetApplicationSceVersion|39_33`), and site 4 reports identically on 0.6.4, 0.6.6
+and 0.6.7. Pattern-based lookup earned its keep: the ordinals moved 0.6.4 -> 0.6.6
+and held 0.6.6 -> 0.6.7.
+
 ## Upstream 0.6.2
 
 An optimisation release, not a correctness fix. Measured on a 679 MB dump:
@@ -289,15 +498,21 @@ DLL hash matches, and `LibProsperoPkg.Gui.dll` is still stamped `0.6.4.0`. Almos
 certainly a bad repack. Its release note ("forces the DRM mode to be redefined as
 standard") is not in the binaries either: the 0.6.2 -> 0.6.4 lib diff contains zero
 DRM-related lines, the GUI has no `applicationDrmType` string at all, and a build
-with `--retain-param-json` from an `upgradable` source came out `upgradable`.
+with the param.json rewrite disabled, from an `upgradable` source, came out `upgradable`.
 
-The library only ever *reads* the field. `BuildContainer` stamps `drm_type = 16`
-and content flag `0x08000000` when it equals `"upgradable"`, and
+Through 0.6.5 the library only ever *reads* the field. `BuildContainer` stamps
+`drm_type = 16` and content flag `0x08000000` when it equals `"upgradable"`, and
 `CollectMediaEntries` only generates a debug licence when it equals `"standard"`.
 The one place it writes `"standard"` is a `??=` fill-in for a *missing* key. So
-this CLI keeps forcing the value itself — and so does every other third-party
-front end (PSVIETHOA FPKG Builder ships "engine from fpkg-gui 0.6.5 **+ DRM
-fix**", patching `param.json` and restoring it byte-for-byte, exactly as here).
+this CLI forced the value itself, as did every other third-party front end
+(PSVIETHOA FPKG Builder shipped "engine from fpkg-gui 0.6.5 **+ DRM fix**",
+patching `param.json` and restoring it byte-for-byte, exactly as here).
+
+**Resolved upstream in 0.6.6.** `ApplicationDrmTypeOverride` made the override a
+real build option; 0.6.7 extended it to additional content and inverted the
+`drm_type` test to key off `"free"` rather than `"upgradable"`. The `param.json`
+rewrite is deleted from this CLI as of 0.6.7 — see "What a build changes in the
+source folder".
 
 ### 0.6.3 — disk-full retry
 
@@ -381,6 +596,26 @@ console would not load.
 Hardcoded, not surfaced anywhere: `OutputFormat = DebugImage`,
 `UsePublisherPprNaps = true`, `KrakenCompressionBlockSize = 262144`,
 `PreCompressionShufflePattern = None`, `GenerateParamJsonIfMissing = true`.
+
+**What moved by 0.6.7** (the table above is the 0.6.4 record, kept as-is):
+
+| Control | 0.6.4 | 0.6.6 | 0.6.7 |
+|---|---|---|---|
+| PlayGo chunks | 64 | **100** | 100 |
+| PlayGo chunks, spinner max | 64 | **255** | 255 |
+| PlayGo languages | n/a | **all** (`ulong.MaxValue`), new dialog | all |
+| SDK version | SDK 1.00 (index 1) | **Auto** (index 0) | **SDK 1.00** (index 1) |
+| Application DRM | n/a (no override existed) | **Free** (new combo) | Free |
+| Additional-content DRM | n/a | n/a | **Free** (combo shared with the above) |
+
+Everything else in the table is unchanged in 0.6.7: level 7, block 256 KiB, PFS v2,
+`UsePublisherPprNaps`, coalescing, relocation alignment, deterministic, and the
+`MinimumLayoutSavings` pair (1 MiB / 0.1%).
+
+The CLI's own defaults differ from the GUI in two deliberate places: `--kraken-backend`
+is `Auto` (a CLI-level mode that resolves to Oodle when present and BuiltIn otherwise,
+never Uncompressed), and `--kraken-level` follows whichever backend that picks — 7 for
+Oodle, 6 for BuiltIn. See "Level 7 is not worth it".
 
 Only four combinations change anything, and all of them are narrowing:
 

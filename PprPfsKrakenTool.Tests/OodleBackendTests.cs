@@ -95,10 +95,18 @@ public class OodleBackendTests
             "expected at least one verified multi-chunk (262144-byte) encode with firstChunkCompSize > 0");
     }
 
-    [Fact]
+    /// <summary>
+    /// Describe() has two outputs: the encoder description when a RAD Oodle library resolves, and
+    /// a "looked for …" diagnostic when none does. Only the first is asserted here, so this has to
+    /// skip like every other test in this class when no library is present — otherwise the suite
+    /// is red on any machine that has not been given one, which is the normal state of the repo.
+    /// </summary>
+    [SkippableFact]
     public void DescribeNamesTheEncoderAndItsLimits()
     {
         string d = OodleBackend.Describe(null);
+        Skip.If(d.StartsWith("no RAD Oodle library found", StringComparison.Ordinal),
+                "no RAD Oodle library in fpkg-tools/native/ or native/");
         Assert.Contains("RAD", d);
         Assert.Contains("not Sony publisher-identical", d);
     }

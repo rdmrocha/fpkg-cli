@@ -51,6 +51,16 @@
     <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('T:LibProsperoPkg.Content.ProsperoSdkVersions'))">$(DefineConstants);LIB_HAS_SDK_VERSIONS</DefineConstants>
     <!-- ProsperoSha3 backend diagnostics: only in trees carrying the acceleration patch. -->
     <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoSha3.AccelerationAdvice'))">$(DefineConstants);LIB_HAS_SHA3_DIAGNOSTICS</DefineConstants>
+    <!-- ApplicationDrmTypeOverride and PlayGoLanguageMask arrived in 0.6.6. Before that the
+         only way to set applicationDrmType was to rewrite param.json on disk, which is what
+         the DrmTypePatch class used to do; it is gone, so this probe gates the whole feature
+         rather than choosing between two implementations. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.ApplicationDrmTypeOverride'))">$(DefineConstants);LIB_HAS_APP_DRM</DefineConstants>
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.PlayGoLanguageMask'))">$(DefineConstants);LIB_HAS_PLAYGO_LANGUAGES</DefineConstants>
+    <!-- AdditionalContentDrmTypeOverride, the extraction/verification subsystem and the AC
+         template export all arrived together in 0.6.7. -->
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoBuildOptions.AdditionalContentDrmTypeOverride'))">$(DefineConstants);LIB_HAS_AC_DRM</DefineConstants>
+    <DefineConstants Condition="Exists('$(LibXmlPath)') And $([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoPackageArchive.ExportAdditionalContentTemplate'))">$(DefineConstants);LIB_HAS_ARCHIVE_067</DefineConstants>
     <!-- FpkgVirtualSource is now a ProjectReference (below) and therefore always present:
          the CLI ships it in fpkg-tools/bin/ so that `fpkg patch` can apply the ffpfsc leg
          with nothing but the zip. It used to be feature-detected off a LibDir copy that only
