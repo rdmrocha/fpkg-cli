@@ -79,6 +79,58 @@ public class AcceptanceTests
     }
 
     /// <summary>
+    /// --in-place and --out take different write paths now. They must still produce identical
+    /// bytes, and both must equal the oracle. If this ever fails, the two paths have diverged
+    /// and one of them is wrong — do not adjust this test.
+    ///
+    /// <para>
+    /// The digest assertions alone do NOT prove which path ran: the staged writer renames its
+    /// temporary over the target, so a --in-place that still staged would produce the same bytes
+    /// AND leave no .repair-playgo.tmp behind. The stage lines are what distinguish them — the
+    /// journal stage and the 8-stage total exist only on the in-place path, and "staging pass"
+    /// exists only on the staged one. Remove the InPlaceWriter routing (or leave the in-place
+    /// total at the staged writer's 7) and those three assertions fail; break the CRC/SI rebuild
+    /// over the in-place image and the digests fail; drop InPlaceWriter's final File.Delete and
+    /// the journal assertion fails.
+    /// </para>
+    /// </summary>
+    [SkippableFact]
+    public void InPlaceAndOutProduceIdenticalBytes()
+    {
+        RequireArtifacts();
+        var viaOut = FreshOutPath();
+        var copy = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                          System.IO.Path.GetRandomFileName() + ".pkg");
+        try
+        {
+            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", TestPackage.Path, "--out", viaOut]));
+            File.Copy(TestPackage.Path, copy);
+
+            var captured = new StringWriter();
+            var previous = Console.Out;
+            try
+            {
+                Console.SetOut(captured);
+                Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+            }
+            finally { Console.SetOut(previous); }
+            string output = captured.ToString();
+
+            Assert.Equal(Bytes.Sha256(viaOut), Bytes.Sha256(copy));
+            Assert.Equal(Bytes.Sha256(Oracle.Path), Bytes.Sha256(copy));
+            Assert.False(File.Exists(copy + ".repair-playgo.tmp"));
+            Assert.False(File.Exists(RepairJournal.PathFor(copy, null)));
+
+            // The in-place path, named: journal first, eight stages, and none of the staged
+            // writer's two passes.
+            Assert.Contains("[5/8] journalling the original CNT and SI", output);
+            Assert.Contains("[8/8] appending the rebuilt SI", output);
+            Assert.DoesNotContain("staging pass", output);
+        }
+        finally { File.Delete(viaOut); File.Delete(copy); }
+    }
+
+    /// <summary>
     /// The user-visible symptom the feature exists to remove: `fpkg verify` warns about the
     /// original package's initial chunk counts and must not warn about the repaired one.
     /// </summary>

@@ -312,14 +312,22 @@ internal static class RepairPlayGoCommand
     }
 
     /// <summary>
-    /// Stage names and counts, in order. The write path stages 5-7 do not run for a dry run, and
+    /// Stage counts, one per mode. The four shared stages (reading package, recovering PlayGo
+    /// values, generating replacement entries, resealing the CNT) run in every mode; the write
+    /// stages after them do not run for a dry run, and the two writers do not run the same ones.
     /// <see cref="Progress"/> prints <c>[n/total]</c>, so the total has to be the one for the mode
     /// actually being run — a dry run that announced 7 stages and stopped at 4 would read as a
-    /// failure. <c>--in-place</c> still goes through the staged two-pass writer, so it has no
-    /// journal stage of its own yet; that arrives when the in-place writer is routed in.
+    /// failure, and an in-place run announcing the staged writer's 7 would print <c>[8/7]</c>.
+    ///
+    /// <para>
+    /// 4 + 3 for <c>--out</c> (two staging passes around the CRC table) and 4 + 4 for
+    /// <c>--in-place</c>, whose extra stage is the journal <see cref="InPlaceWriter.Write"/> makes
+    /// durable before it touches a byte of the package.
+    /// </para>
     /// </summary>
     private const int DryRunStages = 4;
     private const int WriteStages = 7;
+    private const int InPlaceWriteStages = 8;
 
     /// <summary>
     /// Recovery restores and then STOPS, so it runs exactly one stage and none of the repair's.
@@ -345,7 +353,9 @@ internal static class RepairPlayGoCommand
             return recovery;
 
         var progress = new Progress(Console.Out, verbose, isTty,
-                                    totalStages: target is null ? DryRunStages : WriteStages);
+                                    totalStages: target is null ? DryRunStages
+                                               : inPlace ? InPlaceWriteStages
+                                               : WriteStages);
 
         // FIRST, and before any of the three slow calls below. PlayGoInitialChunkProblem,
         // PackageRegions.Load and CntEntryTable.Parse each take seconds on a 661 MB package, and
@@ -468,8 +478,15 @@ internal static class RepairPlayGoCommand
             return 0;
         }
 
-        WriteRepaired(regions, repaired, contentId, target, replaceTarget: inPlace,
-                      tempDir: tempDir, progress: progress);
+        // The two modes take different write paths, and every guard above has already run for
+        // both. --in-place rewrites the package itself under a journal, needing no free space
+        // beside it and leaving no temporary file; --out stages into a temporary and renames.
+        if (inPlace)
+            InPlaceWriter.Write(regions, repaired, contentId, target,
+                                RepairJournal.PathFor(target, tempDir), progress);
+        else
+            WriteRepaired(regions, repaired, contentId, target, tempDir: tempDir,
+                          progress: progress);
         progress.Finish();
         Console.WriteLine();
         Console.WriteLine($"written: {target}");
@@ -643,9 +660,8 @@ internal static class RepairPlayGoCommand
     }
 
     /// <summary>
-    /// Writes in two passes into a temporary file BESIDE the target, and renames over the target
-    /// only once the write has fully succeeded — the original is never truncated first, which is
-    /// what makes <c>--in-place</c> safe.
+    /// The <c>--out</c> writer. Writes in two passes into a temporary file BESIDE the target, and
+    /// renames onto the target only once the write has fully succeeded.
     ///
     /// <para>
     /// Two passes because the SI's CRC table is computed over the REPAIRED mount image (FIH +
@@ -661,13 +677,14 @@ internal static class RepairPlayGoCommand
     /// own size.
     /// </para>
     /// <para>
-    /// <paramref name="replaceTarget"/> is true only for <c>--in-place</c>, whose whole job is to
-    /// replace its target. For <c>--out</c> the rename refuses to clobber, which closes the TOCTOU
-    /// window between the existence check in <see cref="Run"/> and this rename.
+    /// The rename refuses to clobber, which closes the TOCTOU window between the existence check
+    /// in <see cref="Run"/> and this rename. It used to take an <c>overwrite</c> flag, set only by
+    /// <c>--in-place</c>; that mode now goes through <see cref="InPlaceWriter"/>, so nothing here
+    /// has any business replacing a file that already exists.
     /// </para>
     /// </summary>
     private static void WriteRepaired(PackageRegions regions, CntRepairResult repaired,
-                                      string contentId, string target, bool replaceTarget,
+                                      string contentId, string target,
                                       string? tempDir, Progress progress)
     {
         // The staging file sits beside the target by default, so that File.Move is a rename within
@@ -699,11 +716,11 @@ internal static class RepairPlayGoCommand
             progress.Stage("staging pass 2 (repaired CNT and SI)");
             regions.WriteTo(tmp, repaired.Cnt, newSi, flushToDisk: true, progress: progress);
             CopyFileMode(regions.SourcePath, tmp);
-            File.Move(tmp, target, overwrite: replaceTarget);
+            File.Move(tmp, target, overwrite: false);
         }
         catch
         {
-            // The target is untouched until the Move above, in place or not.
+            // The target is untouched until the Move above.
             try { File.Delete(tmp); } catch (Exception) { /* best effort */ }
             throw;
         }
