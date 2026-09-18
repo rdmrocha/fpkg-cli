@@ -363,4 +363,86 @@ public class RepairPlayGoCommandTests
             () => RepairPlayGoCommand.EnsureScenarioJsonIsGeneric(custom, r));
         Assert.Contains("custom scenario presentation", ex.Message);
     }
+
+    /// <summary>
+    /// THE regression test for the --out path writing the package twice: its two passes both went
+    /// through <c>PackageRegions.WriteTo</c>, which starts with a create-and-truncate, so the
+    /// second pass rewrote the whole payload to replace a ~660 KB SI tail. A user watched their
+    /// 90 GB package's temporary file grow to 80 GB, vanish and regrow.
+    ///
+    /// <para>
+    /// The anchor is BYTES WRITTEN, counted at the staging file itself. It has to be: the output
+    /// was always byte-correct — the digest gates in <c>AcceptanceTests</c> passed throughout the
+    /// bug's life and cannot see it. Nor can the absence of a temporary, or the stage lines, or
+    /// the file's final length. Only the volume of writing distinguishes one pass over the payload
+    /// from two, so that is what is asserted, against the one-pass figure rather than merely
+    /// "less than twice".
+    /// </para>
+    /// <para>
+    /// Deliberately NOT a tolerance wide enough to swallow a payload: the margin is 1 MiB on a
+    /// ~630 MB package, so restoring the second <c>WriteTo</c> fails this by ~630 MB.
+    /// </para>
+    /// </summary>
+    [SkippableFact]
+    public void OutWritesThePayloadOnceNotTwice()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var dir = Directory.CreateTempSubdirectory("repair-playgo-once").FullName;
+        try
+        {
+            var regions = PackageRegions.Load(TestPackage.Path);
+            string contentId = CntHeader.ReadContentId(regions.Cnt);
+            var repaired = CntRepair.Repair(regions.Cnt, contentId, Passcode);
+            var target = Path.Combine(dir, "out.pkg");
+
+            long written = 0;
+            RepairPlayGoCommand.WriteRepaired(
+                regions, repaired, contentId, target, workDir: null,
+                progress: new Progress(TextWriter.Null, false, false, 8),
+                openStagingFile: (path, mode) => new CountingStream(
+                    new FileStream(path, mode, FileAccess.ReadWrite, FileShare.None),
+                    n => written += n));
+
+            long payloadAndCnt = regions.CntOffset + repaired.Cnt.LongLength;
+            long si = new FileInfo(target).Length - payloadAndCnt;
+            Assert.True(si > 0, "the repaired package must end with an SI");
+
+            long once = payloadAndCnt + si;
+            Assert.InRange(written, once, once + 1024 * 1024);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
+    /// A pass-through stream that counts the bytes written through it. Named for what it is: a
+    /// test seam, not a production wrapper. It forwards <c>Seek</c> and <c>SetLength</c> because
+    /// the second pass seeks to the end of the CNT and truncates there.
+    /// </summary>
+    private sealed class CountingStream(Stream inner, Action<long> counted) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] b, int o, int c) => inner.Read(b, o, c);
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => inner.SetLength(value);
+        public override void Write(byte[] b, int o, int c)
+        {
+            inner.Write(b, o, c);
+            counted(c);
+        }
+        public override void Write(ReadOnlySpan<byte> b)
+        {
+            inner.Write(b);
+            counted(b.Length);
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) inner.Dispose();
+            base.Dispose(disposing);
+        }
+    }
 }

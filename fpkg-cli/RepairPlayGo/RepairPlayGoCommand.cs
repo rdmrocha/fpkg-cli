@@ -796,9 +796,19 @@ internal static class RepairPlayGoCommand
     /// read. The second pass keeps the flush, which is what makes the rename safe.
     /// </para>
     /// <para>
-    /// The payload is copied through verbatim on each pass — never decoded, recompressed or
-    /// modified — so the repair needs free space beside the target roughly equal to the package's
-    /// own size.
+    /// Only the FIRST pass writes the package. The second used to call
+    /// <see cref="PackageRegions.WriteTo"/> again, which begins with a create-and-truncate, so the
+    /// whole payload was rewritten to swap a ~660 KB SI tail: on a 90 GB package, ~180 GB written
+    /// for 90 GB of output, seen by the user who reported it as the temporary growing to 80 GB,
+    /// vanishing and regrowing. It now seeks, exactly as <see cref="InPlaceWriter"/> does, via
+    /// <see cref="PackageRegions.OverwriteSi"/>. No journal is involved: the file being edited is
+    /// the staging temporary, and the target is untouched until the rename below.
+    /// </para>
+    /// <para>
+    /// The payload is copied through verbatim, once — never decoded, recompressed or modified — so
+    /// the repair still needs free space beside the target roughly equal to the package's own
+    /// size. <c>--in-place</c> needs none of it: it writes ~64 MB (the journal, plus the CNT and
+    /// SI in their own footprint) whatever the package's size.
     /// </para>
     /// <para>
     /// The rename refuses to clobber, which closes the TOCTOU window between the existence check
@@ -807,10 +817,27 @@ internal static class RepairPlayGoCommand
     /// has any business replacing a file that already exists.
     /// </para>
     /// </summary>
-    private static void WriteRepaired(PackageRegions regions, CntRepairResult repaired,
-                                      string contentId, string target,
-                                      string? workDir, Progress progress)
+    /// <param name="openStagingFile">
+    /// How the staging temporary is opened, for both passes. Null means the real filesystem, which
+    /// is what production uses; a test passes a byte-counting stream through it to assert that this
+    /// path writes the payload once rather than twice.
+    /// </param>
+    internal static void WriteRepaired(PackageRegions regions, CntRepairResult repaired,
+                                       string contentId, string target,
+                                       string? workDir, Progress progress,
+                                       Func<string, FileMode, Stream>? openStagingFile = null)
     {
+        // The invariant the seek in pass 2 rests on, asserted as InPlaceWriter asserts it: pass 1
+        // writes repaired.Cnt at CntOffset, and pass 2 puts the SI at CntOffset + Cnt.Length. If
+        // the repaired CNT were not exactly as long as the region it replaces, that offset would
+        // land inside the CNT or leave a hole, and every digest would be computed over the wrong
+        // bytes.
+        if (repaired.Cnt.LongLength != regions.Cnt.LongLength)
+            throw new InvalidOperationException(
+                $"the repaired CNT is {repaired.Cnt.LongLength:N0} bytes but the region it must occupy is " +
+                $"{regions.Cnt.LongLength:N0}; the staged writer places the SI at the end of the CNT, " +
+                "so a CNT that changed length would put it at the wrong offset.");
+
         // The staging file sits beside the target by default, so that File.Move is a rename within
         // one filesystem. --work-dir moves it elsewhere on the user's say-so; Run has already
         // created that directory and warned about the rename it may weaken.
@@ -822,7 +849,10 @@ internal static class RepairPlayGoCommand
         try
         {
             progress.Stage("staging pass 1 (repaired CNT, empty SI)");
-            regions.WriteTo(tmp, repaired.Cnt, [], flushToDisk: false, progress: progress);
+            regions.WriteTo(tmp, repaired.Cnt, [], flushToDisk: false, progress: progress,
+                            openDestination: openStagingFile is null
+                                ? null
+                                : path => openStagingFile(path, FileMode.Create));
 
             byte[] newSi;
             progress.Stage("computing the mount CRC table");
@@ -837,8 +867,13 @@ internal static class RepairPlayGoCommand
                                          progress);
             }
 
-            progress.Stage("staging pass 2 (repaired CNT and SI)");
-            regions.WriteTo(tmp, repaired.Cnt, newSi, flushToDisk: true, progress: progress);
+            // Named for what it now does. It no longer restages anything: the payload and the CNT
+            // pass 1 wrote stay on disk untouched and only the SI tail is written.
+            progress.Stage("writing the rebuilt SI onto the staged file");
+            regions.OverwriteSi(tmp, repaired.Cnt.LongLength, newSi, progress: progress,
+                                openStaged: openStagingFile is null
+                                    ? null
+                                    : path => openStagingFile(path, FileMode.Open));
             CopyFileMode(regions.SourcePath, tmp);
             File.Move(tmp, target, overwrite: false);
         }

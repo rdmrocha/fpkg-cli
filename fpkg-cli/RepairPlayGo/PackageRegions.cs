@@ -133,11 +133,16 @@ internal sealed record PackageRegions(
     /// The pass whose output is about to be renamed over the target must keep it.
     /// </para>
     /// </summary>
+    /// <param name="openDestination">
+    /// How the destination file is created. Null means <see cref="File.Create(string)"/>, which is
+    /// what production uses; a test passes a byte-counting stream through it to assert how much
+    /// this command actually writes.
+    /// </param>
     internal void WriteTo(string outputPath, byte[] cnt, byte[] si, bool flushToDisk = true,
-                          Progress? progress = null)
+                          Progress? progress = null, Func<string, Stream>? openDestination = null)
     {
         using var src = File.OpenRead(SourcePath);
-        using var dst = File.Create(outputPath);
+        using var dst = openDestination is null ? File.Create(outputPath) : openDestination(outputPath);
         // Header, FIH and the whole outer PFS, byte for byte. Never decoded, never rewritten.
         var buffer = new byte[81920];
         long total = CntOffset + cnt.Length + si.Length;
@@ -157,6 +162,56 @@ internal sealed record PackageRegions(
         // over the target, and the only data-loss window in that sequence is a power loss straight
         // after the rename leaving a renamed-but-incomplete file. Committing the bytes first
         // closes it. An intermediate pass has no such window and opts out.
-        dst.Flush(flushToDisk);
+        FlushStaged(dst, flushToDisk);
+    }
+
+    /// <summary>
+    /// <c>Flush(bool)</c> — the one that reaches the DEVICE — exists on <see cref="FileStream"/>,
+    /// not on <see cref="Stream"/>, and the destination is a <see cref="Stream"/> so that a test
+    /// can interpose. A wrapper is asked to flush its own buffers; only a real file can be fsynced.
+    /// </summary>
+    private static void FlushStaged(Stream dst, bool flushToDisk)
+    {
+        if (dst is FileStream file) file.Flush(flushToDisk);
+        else dst.Flush();
+    }
+
+    /// <summary>
+    /// Replaces ONLY the trailing SI of a file <see cref="WriteTo"/> has already staged, by
+    /// seeking to the end of the CNT and writing the new segment there. The payload and the CNT
+    /// below <c>CntOffset + cnt.Length</c> are left exactly as they are.
+    /// <para>
+    /// This is why the staged (<c>--out</c>) path writes the package once rather than twice.
+    /// <see cref="WriteTo"/> begins with a create-and-truncate, so calling it a second time to
+    /// swap a ~660 KB SI rewrote the entire payload again — on the 90 GB package a user reported,
+    /// ~180 GB written for 90 GB of output, visible as the temporary file growing to 80 GB,
+    /// vanishing and regrowing. <see cref="InPlaceWriter"/> already used this seek-and-truncate
+    /// shape; the staged writer now does too.
+    /// </para>
+    /// <para>
+    /// No journal is involved and none is needed: the file being edited is the staging temporary,
+    /// which does not yet exist as far as the user is concerned, and the target is untouched until
+    /// the caller's <c>File.Move</c>.
+    /// </para>
+    /// </summary>
+    /// <param name="openStaged">
+    /// How the staged file is reopened. Null means <c>FileMode.Open, FileAccess.ReadWrite</c>,
+    /// which is what production uses; a test passes a byte-counting stream through it.
+    /// </param>
+    internal void OverwriteSi(string outputPath, long cntLength, byte[] si,
+                              Progress? progress = null, Func<string, Stream>? openStaged = null)
+    {
+        long siOffset = CntOffset + cntLength;
+        using var dst = openStaged is null
+            ? new FileStream(outputPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)
+            : openStaged(outputPath);
+        dst.Seek(siOffset, SeekOrigin.Begin);
+        dst.Write(si, 0, si.Length);
+        // Cut to the new end: the rebuilt SI is normally shorter than the one pass 1 left room for
+        // (pass 1 writes none at all), and anything beyond it is not part of the package.
+        dst.SetLength(siOffset + si.LongLength);
+        progress?.Report(si.Length, si.Length);
+        // This is the pass whose output is renamed over the target, so it keeps the fsync.
+        FlushStaged(dst, flushToDisk: true);
     }
 }

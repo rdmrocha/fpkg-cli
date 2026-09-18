@@ -1,6 +1,6 @@
 # `fpkg repair-playgo` — implementation spec
 
-Rewrites a package's PlayGo metadata in place, to the shape LibProsperoPkg 0.6.9 produces. The payload is never decoded, recompressed or modified — it is copied through verbatim — so the repair takes seconds instead of the hours a rebuild costs, and needs no extraction. It is not copy-free: the output is assembled in a temporary file beside the target and renamed over it, so it needs free space beside the target roughly equal to the package's own size. The write is two passes over that temp file (the SI's CRC covers the repaired mount image, so those bytes must exist before the SI can be built), which means one repair reads and writes the payload twice.
+Rewrites a package's PlayGo metadata in place, to the shape LibProsperoPkg 0.6.9 produces. The payload is never decoded, recompressed or modified — it is copied through verbatim — so the repair takes seconds instead of the hours a rebuild costs, and needs no extraction. It is not copy-free: the output is assembled in a temporary file beside the target and renamed over it, so it needs free space beside the target roughly equal to the package's own size. The write is two passes over that temp file (the SI's CRC covers the repaired mount image, so those bytes must exist before the SI can be built), but only the first writes the package: the second seeks to the end of the CNT and writes the ~660 KB SI tail, so the payload is written **once**, ~1× the package.
 
 Everything below marked PROVEN was measured on `Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg` (661,006,510 B, built with 0.6.8) against the same source rebuilt with 0.6.9.
 
@@ -267,13 +267,18 @@ fpkg repair-playgo <pkg> [--passcode <32>] [--out <path>] [--in-place] [--dry-ru
 ## The in-place write, journalled
 
 `--out` stages the whole repaired package beside the target and renames over it: correct, but it
-needs free space roughly equal to the package's own size, and its two passes over that temp file
-mean the payload is read and written twice — **~1.32 GB of I/O and 2× disk**, measured on the test
-package (661,006,510 B).
+needs free space roughly equal to the package's own size. Its second pass seeks rather than
+restaging, so the payload is written once — **~661 MB written and 1× disk**, measured on the test
+package (661,006,510 B). (It used to restage: both passes went through `WriteTo`, which creates and
+truncates, so the whole payload was rewritten to swap a ~660 KB SI tail — ~1.32 GB written, and on a
+90 GB package ~180 GB.)
 
 `--in-place` instead writes the repair into the target's own footprint: ~128 MB of writes and ~64 MB
-of spare disk for the journal, against `--out`'s ~1.32 GB and a second copy of the whole package. It
-is cheaper, not free — see "Cost, measured" below. That it is possible at all rests on two
+of spare disk for the journal, against `--out`'s ~661 MB of writes and a second copy of the whole
+package. The gap is not a tuning detail and it widens without bound: in-place writes ~64 MB of
+package data whatever the package's size, so on a 90 GB package it writes ~64 MB where `--out`
+writes a full 90 GB copy — a different order of magnitude, not a percentage. It is cheaper, not
+free — see "Cost, measured" below. That it is possible at all rests on two
 invariants the repair already enforces:
 
 - **The outer PFS never changes.** No digest in the FIH/CNT chain covers the payload (see "PROVEN:
@@ -410,12 +415,14 @@ the user can see".
 |                    | `--in-place`                                                              | `--out`                                                        |
 |--------------------|----------------------------------------------------------------------------|-----------------------------------------------------------------|
 | extra disk needed  | ~64 MB — the journal, sized to the CNT + SI it captures, deleted when the repair completes. **Not zero**: no second copy of the package is made, but the journal is a real allocation and the repair cannot start without room for it. | roughly the package's own size (~661 MB), beside the target, until the rename |
-| data written       | ~128 MB — the journal (~64.2 MB) **plus** the repaired CNT and SI (~64.2 MB) written back into the file's own existing footprint | ~1.32 GB — two full passes over the ~661 MB staging file |
-| data read          | ~661 MB to load the regions, then ~660 MB for the CRC pass over the repaired image ≈ 1.32 GB | ~661 MB to load the regions, ~661 MB copying the payload into the staging file on each of two passes, ~660 MB for the CRC pass ≈ 2.64 GB |
+| data written       | ~128 MB — the journal (~64.2 MB) **plus** the repaired CNT and SI (~64.2 MB) written back into the file's own existing footprint | ~661 MB — one pass over the staging file, then the ~660 KB SI written at a seek (661,005,150 B measured) |
+| data read          | ~661 MB to load the regions, then ~660 MB for the CRC pass over the repaired image ≈ 1.32 GB | ~661 MB to load the regions, ~661 MB copying the payload into the staging file (once), ~660 MB for the CRC pass ≈ 1.98 GB |
 
 The headline is not "in-place is free" — it is that in-place never copies the ~596 MB payload, so it
-writes ~128 MB where `--out` writes ~1.32 GB, and needs ~64 MB of spare disk where `--out` needs
-~661 MB.
+writes ~128 MB where `--out` writes ~661 MB, and needs ~64 MB of spare disk where `--out` needs
+~661 MB. These figures scale differently: in-place's ~128 MB is fixed by the CNT and SI, while
+`--out`'s is the package. On a 90 GB package that is ~64 MB of package data written against a full
+90 GB copy.
 
 ## Acceptance
 
