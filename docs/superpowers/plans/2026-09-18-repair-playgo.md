@@ -1399,7 +1399,12 @@ git commit -m "feat: regenerate playgo-chunk.dat, playgo-ficm.dat and playgo-sce
 
 `Repair` parses the table, recovers the values, builds the three entries, substitutes their
 payloads, checks the slack, and calls `CntReseal.Seal`. Slack is
-`body_offset + body_size - (last physical entry's DataOffset + aligned DataSize)`, and `NetDelta` is
+`body_offset + body_size - (last physical entry's DataOffset + its UNALIGNED DataSize)`.
+The last entry's 16-byte alignment tail counts as slack precisely because nothing follows it:
+entry 12288 ends at 63,525,245 (0x3C9517D) and the body ends at 63,569,920, giving **44,675**.
+Using the aligned end gives 44,672 and under-reports by 3 bytes. An earlier draft of this line
+said "aligned", which contradicted both the spec's measured figure and this plan's own
+assertion; the measured value is authoritative, and `NetDelta` is
 the signed sum of the three size deltas — **negative for this package**. Only a `NetDelta` greater
 than `SlackBefore` throws; a negative one is normal and simply leaves more slack. The throw carries
 both numbers and points at the `body_size` bump described in the spec as the unimplemented fallback.
