@@ -33,9 +33,17 @@ internal static class InPlaceWriter
     /// <param name="target">The package to mutate, in place.</param>
     /// <param name="journalPath">Where the recovery journal lives for the duration of the write.</param>
     /// <param name="progress">Four stages: journal, CNT, CRC/SI rebuild, append.</param>
+    /// <param name="faultAfterCntWrite">
+    /// Test seam, and nothing else: invoked once the CNT has been spliced and committed but before
+    /// the SI is rebuilt — the exact window in which the package is neither the original nor the
+    /// repair. Recoverability from that window is the property the journal exists for, and there is
+    /// no external way to provoke it (it needs an I/O error, a full disk or a kill), so the seam is
+    /// how <c>InPlaceWriterTests</c> proves the journal survives instead of asserting it by reading
+    /// the code. Production callers leave it null.
+    /// </param>
     internal static void Write(PackageRegions regions, CntRepairResult repaired,
                                string contentId, string target, string journalPath,
-                               Progress progress)
+                               Progress progress, Action? faultAfterCntWrite = null)
     {
         // A journal already on disk is an interrupted repair's ONLY copy of the original CNT and
         // SI, and RepairJournal.Write opens with FileMode.Create — so a re-run's first act would
@@ -62,15 +70,23 @@ internal static class InPlaceWriter
             // 2. The repaired CNT goes back into its own footprint, byte for byte the same length.
             progress.Stage("writing the repaired CNT in place");
             file.Seek(regions.CntOffset, SeekOrigin.Begin);
-            for (int offset = 0; offset < repaired.Cnt.Length; offset += CopyBuffer)
+            for (long offset = 0; offset < repaired.Cnt.LongLength; offset += CopyBuffer)
             {
-                int n = Math.Min(CopyBuffer, repaired.Cnt.Length - offset);
-                file.Write(repaired.Cnt, offset, n);
+                // The cast cannot overflow: Cnt is a byte[] held whole in memory, so it is
+                // int-indexable by construction. Long arithmetic here only to stay consistent with
+                // the LongLength the guard above compares.
+                int n = (int)Math.Min(CopyBuffer, repaired.Cnt.LongLength - offset);
+                file.Write(repaired.Cnt, checked((int)offset), n);
                 progress.Report(offset + n, repaired.Cnt.LongLength);
             }
-            // To the DEVICE before the CRC pass reads it back: the CRC now reduces over THIS file,
-            // and a stale managed buffer here would silently produce a wrong CRC table.
+            // NOT for the CRC's benefit: FileStream flushes its own write buffer on the Seek and
+            // reads that follow against this same handle, so the CRC would see the new CNT either
+            // way. This is durability and write ordering — the CNT reaches the device before the
+            // SI that describes it, so a crash between them leaves a state the journal can undo.
+            // Do not remove it on the grounds that the CRC does not need it.
             file.Flush(flushToDisk: true);
+
+            faultAfterCntWrite?.Invoke();
 
             // 3. The target IS the repaired mount image now, so the CRC reads it directly — no
             //    staged copy exists to read instead. BuildChunkCrc reduces from the stream's
