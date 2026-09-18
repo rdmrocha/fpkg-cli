@@ -44,7 +44,7 @@ internal sealed class Progress
 
         _stageIndex++;
         _stageName = name;
-        _lastEmitTicks = 0;
+        _lastEmitTicks = -1; // sentinel: nothing emitted yet this stage (0 is a real tick value)
         _lastPercent = 0;
         _stageClock.Restart();
 
@@ -58,12 +58,17 @@ internal sealed class Progress
             return;
 
         int pct = (int)(done * 100 / total);
+        // Clamp to a valid percentage, and never let it move backwards within a stage — callers
+        // (later tasks forward library callbacks directly) are not trusted to be well-behaved.
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        if (pct < _lastPercent) pct = _lastPercent;
         if (pct <= 0 || pct == _lastPercent)
             return;
 
         long nowTicks = _stageClock.ElapsedTicks;
         long elapsedSinceEmitMs = (nowTicks - _lastEmitTicks) * 1000 / Stopwatch.Frequency;
-        bool timeElapsed = _lastEmitTicks == 0 || elapsedSinceEmitMs >= 250;
+        bool timeElapsed = _lastEmitTicks < 0 || elapsedSinceEmitMs >= 250;
         bool percentJumped = pct - _lastPercent >= 5;
         if (!timeElapsed && !percentJumped)
             return;

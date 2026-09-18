@@ -51,8 +51,11 @@ public class ProgressTests
     [Fact]
     public void ReportBeforeAnyStageDoesNotThrow()
     {
-        var p = new Progress(new StringWriter(), verbose: false, isTty: false, totalStages: 1);
+        var sw = new StringWriter();
+        var p = new Progress(sw, verbose: false, isTty: false, totalStages: 1);
         p.Report(1, 2);      // must be a no-op, not a crash
+        Assert.Equal("", sw.ToString());
         p.Finish();
+        Assert.Equal("", sw.ToString());
     }
 }
