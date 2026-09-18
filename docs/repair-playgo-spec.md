@@ -268,7 +268,7 @@ fpkg repair-playgo <pkg> [--passcode <32>] [--out <path>] [--in-place] [--dry-ru
 2. **The semantics.** Repair the 0.6.8 package. The output must be byte-identical to the 0.6.9
    rebuild of the same source. This proves the three new entries and the relayout are right.
 
-The oracle for (2) needs no external artifact — the package is its own source:
+The oracle for (2) is rebuilt from the package itself:
 
 ```sh
 PKG=Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg
@@ -277,6 +277,29 @@ PKG=Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg
 cp -R out/inner src/ && cp -R out/source/sce_sys/. src/sce_sys/
 ./fpkg build --source src --out oracle/
 ```
+
+**This recipe does not reproduce a byte-identical oracle in every environment, and an earlier draft
+of this section wrongly claimed it needed no external artifact.** Measured: re-running it on a host
+with no RAD Oodle library in `fpkg-tools/native/` selects the BuiltIn Kraken encoder, and the
+resulting package is **667,365,986 bytes against the reference oracle's 661,005,150** — a payload
+6,356,992 bytes larger, with `EmbeddedCntOffset` 603,127,808 rather than 596,770,816. The difference
+is entirely inner-image compression; nothing about the repair.
+
+What that rebuild *did* reproduce exactly is the part this feature generates: entries **4097 = 5376,
+8209 = 62, 12288 = 2293**, identical to the reference oracle's. So a rebuild under a different
+compressor still corroborates the PlayGo semantics even though it cannot serve as the byte-compare
+oracle.
+
+Consequences, stated plainly so nobody mistakes the gate for more than it is:
+
+- Gate 2 compares against a **specific retained artifact**, not a from-source reproduction. Keep the
+  oracle under `.oracle/pkg/`; it is not regenerable bit-for-bit without matching the compressor of
+  the machine that built it.
+- To rebuild an oracle that *is* byte-comparable, the RAD Oodle library must be present and patched
+  in (`./fpkg patch`) so the build selects the same encoder. Confirm from the build log line
+  `kraken backend:` before trusting a regenerated oracle.
+- A regenerated oracle whose three PlayGo entry sizes are 5376 / 62 / 2293 but whose total size
+  differs is a *compressor* mismatch, not a repair defect.
 
 `ValidateLayout` passing, `fpkg verify --full` passing and the `PlayGoInitialChunkProblem` warning
 disappearing are all worth having as fast feedback during development. **None of them is the gate.**
