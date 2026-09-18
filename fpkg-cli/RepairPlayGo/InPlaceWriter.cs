@@ -96,8 +96,35 @@ internal static class InPlaceWriter
             byte[] newSi = SiRepair.Rebuild(regions.Si, contentId, repaired.NewChunkDat,
                                             file, siOffset, progress);
 
+            // The SECOND load-bearing invariant, and the less obvious one: the rebuilt SI must not
+            // be LONGER than the original. Measured on the test package it shrinks, 665,774 ->
+            // 664,414, and the whole recovery story is built on that.
+            //
+            // Not a matter of layout — SetLength would happily grow the file — but of CRASH
+            // RECOVERY. RecoverIfNeeded decides whether an interrupted repair is rolled back by
+            // comparing the file's length against the journal's TargetLength: equal means "steps 2-4
+            // never finished, restore", different means "the repair ran through, discard the stale
+            // journal". A GROWING SI breaks that. The write below would push the file past
+            // TargetLength before SetLength is ever reached, so a crash in the middle of it leaves a
+            // half-written package whose length already differs — which recovery reads as a completed
+            // repair. It would then delete the journal and leave the user a broken package with no
+            // way back.
+            //
+            // Refusing is the same answer the CNT footprint guard gives above, and for the same
+            // reason: an invariant the design rests on is enforced, not assumed. Do NOT "fix" this by
+            // calling SetLength before the write — growing the file first only reopens the same
+            // window in a different shape, with the package still unrecoverable in the middle of it.
+            if (newSi.LongLength > regions.Si.LongLength)
+                throw new InvalidOperationException(
+                    $"the rebuilt SI is {newSi.LongLength:N0} bytes but the original is " +
+                    $"{regions.Si.LongLength:N0}; in-place writing requires that it not grow, " +
+                    "because crash recovery tells an interrupted repair from a completed one by the " +
+                    "file's length, and an SI that grows past the original length mid-write would be " +
+                    "mistaken for a completed repair and its journal discarded.");
+
             // 4. The SI is the last thing in the file, so it can simply be overwritten and the file
-            //    cut to the new end — the repaired SI is usually slightly shorter than the original.
+            //    cut to the new end — the repaired SI is slightly shorter than the original, which
+            //    the guard above turns from an observation into a requirement.
             progress.Stage("appending the rebuilt SI");
             file.Seek(siOffset, SeekOrigin.Begin);
             file.Write(newSi, 0, newSi.Length);

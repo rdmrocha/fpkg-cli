@@ -197,8 +197,17 @@ internal static class RepairPlayGoCommand
     /// interruption from the user entirely, and if a bug caused it, would walk straight back into
     /// it.
     /// </para>
+    ///
+    /// <para>
+    /// Under <paramref name="dryRun"/> it only reports. "A dry run writes nothing" is a property
+    /// users rely on to inspect a package safely, and recovery is the one thing here that would
+    /// otherwise mutate a file before the mode was ever consulted — it runs ahead of every guard by
+    /// design. So a dry run names the interruption, says the package is not in its repaired state,
+    /// and exits non-zero without touching the package or the journal.
+    /// </para>
     /// </summary>
-    internal static int RecoverIfNeeded(string target, string? tempDir, Progress progress)
+    internal static int RecoverIfNeeded(string target, string? tempDir, Progress progress,
+                                        bool dryRun = false)
     {
         string journalPath = RepairJournal.PathFor(target, tempDir);
         var journal = RepairJournal.TryRead(journalPath);
@@ -222,6 +231,16 @@ internal static class RepairPlayGoCommand
                 "destroy the other's only way back, so this refuses to do either. Move or delete " +
                 "the journal by hand once you know which package it belongs to.");
 
+        // Everything above this line only reads. Everything below it writes — so a dry run stops
+        // here. Placed after the identity check so a dry run still reports the more accurate of the
+        // two problems when the journal turns out to belong to another package.
+        if (dryRun)
+            return Program.Fail(
+                $"a previous in-place repair of '{target}' was interrupted: the journal " +
+                $"'{journalPath}' is still on disk, so the package is in neither its original nor " +
+                "its repaired state. Re-run without --dry-run to restore it from the journal. " +
+                "Nothing was written, and no repair can be planned until the package is whole.");
+
         // WHICH SIDE of the write did the crash fall on? Get this wrong and the answer destroys the
         // user's package, so the discriminator is chosen with care.
         //
@@ -232,16 +251,22 @@ internal static class RepairPlayGoCommand
         // exactly the damaged file that most needs restoring. That answer would delete the journal
         // and leave a broken package with no way back.
         //
-        // The file's LENGTH instead. SetLength is the last act of step 4, and the rebuilt SI is a
-        // different size from the original, so:
+        // The file's LENGTH instead. SetLength is the last act of step 4, so:
         //   length == TargetLength -> steps 2-4 did not run to completion  -> RESTORE
         //   length != TargetLength -> the repair ran through; the journal outlived a SUCCESS
         //                             (a File.Delete that failed at step 5) -> DISCARD, never roll back
         // Length is also the one property a half-written CNT cannot forge: step 2 writes the
         // repaired CNT into its own footprint, byte for byte, and changes nothing about the size.
-        // The residual risk is a rebuilt SI that happens to be exactly as long as the original,
-        // which would read as "interrupted" and restore a good repair — annoying, recoverable, and
-        // the right direction to be wrong in.
+        //
+        // This is only sound because the rebuilt SI never GROWS — if it did, the file would pass
+        // TargetLength during the SI write and a crash there would read as "completed" and get its
+        // journal discarded. That is not left to chance: InPlaceWriter refuses outright when the
+        // rebuilt SI is longer than the original, and its comment explains why. If that guard is
+        // ever relaxed, this discriminator is wrong and must change with it.
+        //
+        // The residual risk is the other way round: a rebuilt SI that happens to be EXACTLY as long
+        // as the original, which reads as "interrupted" and restores a good repair — annoying, fully
+        // recoverable, and the right direction to be wrong in.
         long actualLength = new FileInfo(target).Length;
 
         if (actualLength != journal.TargetLength)
@@ -291,7 +316,9 @@ internal static class RepairPlayGoCommand
                                     isTty: !Console.IsOutputRedirected,
                                     totalStages: target is null ? DryRunStages : WriteStages);
 
-        int recovery = RecoverIfNeeded(path, tempDir, progress);
+        // target is null exactly when this is a dry run, which is also how the stage count above is
+        // chosen — the two must not disagree about the mode.
+        int recovery = RecoverIfNeeded(path, tempDir, progress, dryRun: target is null);
         if (recovery >= 0)
             return recovery;
 

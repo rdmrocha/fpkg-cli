@@ -234,6 +234,49 @@ public class InPlaceWriterTests
     }
 
     /// <summary>
+    /// "A dry run writes nothing" is a property users rely on to inspect a package safely, and
+    /// recovery is the one thing that could break it: it runs ahead of every guard, and ahead of the
+    /// mode being consulted at all. A dry run over an interrupted package must therefore report the
+    /// interruption and stop — restoring the package, or deleting the journal, would both be writes.
+    /// </summary>
+    [SkippableFact]
+    public void ADryRunReportsAnInterruptedRepairWithoutTouchingAnything()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var copy = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var journal = copy + RepairJournal.Suffix;
+        try
+        {
+            File.Copy(TestPackage.Path, copy);
+            var regions = PackageRegions.Load(copy);
+            RepairJournal.Write(journal, copy, regions, new Progress(TextWriter.Null, false, false, 1));
+            using (var fs = new FileStream(copy, FileMode.Open, FileAccess.Write))
+            {
+                fs.Position = regions.CntOffset;
+                fs.Write(new byte[1_000_000]);
+            }
+
+            // Taken AFTER the simulated crash: the package is half-written, and a dry run must leave
+            // it exactly that way rather than helpfully putting it back.
+            var packageBefore = Bytes.Sha256(copy);
+            var journalBefore = Bytes.Sha256(journal);
+
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--dry-run"]));
+
+            Assert.Equal(packageBefore, Bytes.Sha256(copy));
+            Assert.True(File.Exists(journal), "a dry run must not consume the journal");
+            Assert.Equal(journalBefore, Bytes.Sha256(journal));
+
+            // Non-vacuous: the very same package, without --dry-run, IS restored — so the assertions
+            // above pin the mode, not some unrelated reason recovery declined to act.
+            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+            Assert.NotEqual(packageBefore, Bytes.Sha256(copy));
+            Assert.False(File.Exists(journal));
+        }
+        finally { File.Delete(copy); File.Delete(journal); }
+    }
+
+    /// <summary>
     /// A journal that belongs to some OTHER package must be acted on in neither direction. Restoring
     /// from it would write one package's regions over another; discarding it would destroy the other
     /// package's only way back. Both are unrecoverable, so the only correct answer is to refuse and
