@@ -1696,14 +1696,35 @@ to be 16-aligned.
 | 1 | `!Pkg.CheckPasscode(passcode)` | refuse: the passcode does not match this package; re-encrypting with it would silently corrupt the five protected entries while every digest still verified |
 | 2 | `common/etc/pfsimage.xml` present in the SI | refuse: it encodes the full entry table and every digest, and reproducing it is unverified |
 | 3 | growth > slack | refuse: name both numbers, and point at the `body_size` bump as the unimplemented fallback |
-| 4 | `playgo-scenario.json` is not generic (below) | refuse: **"this package carries custom scenario presentation; regenerating playgo-scenario.json would replace it with generic 'Scenario #N' labels"** -- not "differs from expected" |
+| 4 | `playgo-scenario.json` declares a member the regeneration would not reproduce (below) | refuse: **"this package carries custom scenario presentation; regenerating playgo-scenario.json would replace it with generic 'Scenario #N' labels"** -- not "differs from expected" |
 | 5 | `ENTRY_KEYS.DataSize != 2944` | refuse: not the PS5 publisher profile this repair was derived against (equivalently `EntryKeys.Keys[0].key.Length != 384`) |
 
-**On guard 4's phrasing and its test.** The comparison is byte-equality against `BuildScenarioJson`,
-whose output embeds a per-language `title`/`description` for every selected language. Any package
-carrying real localised scenario names therefore trips it -- which is the *correct* outcome, since
-0.6.9's "carry the source presentation through" behaviour exists precisely to preserve those and this
-repair cannot. But the message must say that, not imply the file is malformed.
+**On guard 4. The obvious formulation is wrong and would make the feature inert.**
+
+Whole-file byte-equality against `BuildScenarioJson` refuses **every 0.6.8 package** -- including the
+only one we can repair. Measured:
+
+```
+stored (0.6.8)  1,981 B      generated == stored ? False   <- byte-equality would refuse it
+oracle (0.6.9)  2,293 B      generated == oracle ? True
+per-member:  scenarioCount, scenarioDefaultId, scenarioDefaultLanguage, scenarios  -- all IDENTICAL
+added by 0.6.9: chunkDefaultLanguage, chunkSupportedLanguages
+```
+
+The whole 312-byte delta is the two members 0.6.9 **adds**; the scenario presentation is
+byte-identical. The plan's own "1981 -> 2293" line contradicted its own guard.
+
+The correct rule is **additive-only**: every member the stored file declares must be reproduced with
+identical raw JSON text, and the regeneration may only ADD members. That still refuses a package
+carrying real localised scenario names -- its `scenarios` member would differ -- which is the
+*correct* outcome, since 0.6.9's "carry the source presentation through" behaviour exists precisely
+to preserve those and this repair cannot. A package with fewer than 31 languages is likewise refused,
+because its `scenarios` text would disagree; that is the untested branch the spec's Open section
+names, and refusing is right.
+
+The message must say the package carries custom scenario presentation that regeneration would
+replace with generic "Scenario #N" labels -- not imply the file is malformed. A dropped or
+disagreeing member gets its own distinct message.
 
 The test package's own JSON is all `"Scenario #0"`, so the guard's positive path is the only one it
 exercises. **Write the negative-path test too**, synthesising a custom-label JSON -- otherwise the
