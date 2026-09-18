@@ -266,8 +266,10 @@ needs free space roughly equal to the package's own size, and its two passes ove
 mean the payload is read and written twice — **~1.32 GB of I/O and 2× disk**, measured on the test
 package (661,006,510 B).
 
-`--in-place` instead writes the repair into the target's own footprint. That is only possible
-because of two invariants the repair already enforces:
+`--in-place` instead writes the repair into the target's own footprint: ~128 MB of writes and ~64 MB
+of spare disk for the journal, against `--out`'s ~1.32 GB and a second copy of the whole package. It
+is cheaper, not free — see "Cost, measured" below. That it is possible at all rests on two
+invariants the repair already enforces:
 
 - **The outer PFS never changes.** No digest in the FIH/CNT chain covers the payload (see "PROVEN:
   the payload never changes" above), so nothing before `CntOffset` is ever touched by a write.
@@ -313,8 +315,31 @@ A sidecar file, `<package>.repair-playgo.journal` beside the target by default (
 ```
 
 ~64.2 MB on the test package (63,569,920 + 665,774). It is written and flushed to disk **before**
-the package is opened for writing at all, and deleted only after step 5 above completes — so a
-journal found on disk always means step 2, 3 or 4 was interrupted.
+the package is opened for writing at all, and deleting it *is* step 5 — so a journal found on disk
+means one of two things: step 2, 3 or 4 was interrupted, or the repair completed and step 5's
+`File.Delete` itself failed. Recovery tells those apart by the file's length; see below. ("A journal
+always means an interrupted write" is the wrong reading, and acting on it would undo successful
+repairs.)
+
+#### The marker
+
+A second, tiny sidecar: `<package>.repair-playgo.inprogress`, **always beside the package**, never
+under `--work-dir`, holding the absolute path of the journal as UTF-8 text. It is created and
+flushed *before* the journal is written, and deleted immediately after it.
+
+It exists because the journal's location depends on flags, and the recovering run is not the run
+that crashed. `--work-dir /tmp` plus a reboot; a forgotten flag; a different one — in every case a
+recovery that recomputed the journal path from *its own* flags would look in the wrong place, find
+nothing, and fall through to `PlayGoInitialChunkProblem`, which reads entries 4097 and 8209 out of
+the already-**repaired** CNT, finds nothing wrong, prints "Nothing to repair" and exits **0** on a
+package with a stale SI. Silent, undetectable data loss, in the exact failure the journal was built
+for.
+
+So recovery consults the marker **first** and takes the journal path from it when there is one. And
+a marker whose journal is missing or unreadable is a **hard refusal, non-zero**: the package is
+named as mid-repair, the expected journal path is printed, and the run stops. It never proceeds and
+never reports "Nothing to repair" — that path is additionally gated on the marker's absence, because
+"nothing to repair, exit 0" is the single most dangerous sentence the command can print.
 
 **Why the identity hashes the FIH block plus the full path, not the CNT.** A half-finished run has
 the *repaired* CNT on disk — that is exactly the state the journal exists to detect — so an
@@ -355,12 +380,37 @@ half-written result as "completed" and discard the journal, leaving unprotected 
 the discriminator exists to protect. Relaxing the guard makes the discriminator wrong; the two are
 not independent decisions.
 
+**The coupling is not total, and the residual is deliberate.** The guard is `>`, not `>=`: an SI
+rebuilt to *exactly* the original's length is permitted. Such a repair completes without ever
+changing the file's length, so recovery reads it as "interrupted" and restores a repair that had in
+fact succeeded. That is annoying, fully recoverable, and the right direction to be wrong in — unlike
+the growing case, which destroys the package. Stated here because the guard is the thing a future
+editor will want to relax, and the code comment is not where they will look first.
+
+### `--out` and a leftover journal
+
+Recovery runs ahead of every guard and ahead of the mode being consulted, so an `--out` run can find
+a journal too. It acts (restore or discard), stops — and therefore produces **no `--out` file**. It
+must exit **non-zero**, as the `--dry-run` branch already does: exiting 0 tells
+`fpkg repair-playgo … --out FIXED.pkg && install FIXED.pkg` to carry on with a file that was never
+written, or a stale one from an earlier run. The message says plainly that no `--out` file was
+produced, and, in the restore case, that the **input** package was modified — which is the one
+circumstance in which `--out` writes to its input at all.
+
 ### Cost, measured
+
+All figures are for the 661 MB test package, and both columns are stated as **I/O**, not as "work
+the user can see".
 
 |                    | `--in-place`                                                              | `--out`                                                        |
 |--------------------|----------------------------------------------------------------------------|-----------------------------------------------------------------|
-| extra disk needed  | none — the journal (~64 MB) is the only new allocation, and it is deleted when the repair completes | roughly the package's own size, beside the target, until the rename |
-| data written       | ~64 MB (the journal, sized to the CNT + SI it captures); the CNT and SI writes themselves land in the file's own existing footprint | ~1.32 GB — two full passes over the ~661 MB staging file |
+| extra disk needed  | ~64 MB — the journal, sized to the CNT + SI it captures, deleted when the repair completes. **Not zero**: no second copy of the package is made, but the journal is a real allocation and the repair cannot start without room for it. | roughly the package's own size (~661 MB), beside the target, until the rename |
+| data written       | ~128 MB — the journal (~64.2 MB) **plus** the repaired CNT and SI (~64.2 MB) written back into the file's own existing footprint | ~1.32 GB — two full passes over the ~661 MB staging file |
+| data read          | ~661 MB to load the regions, then ~660 MB for the CRC pass over the repaired image ≈ 1.32 GB | ~661 MB to load the regions, ~661 MB copying the payload into the staging file on each of two passes, ~660 MB for the CRC pass ≈ 2.64 GB |
+
+The headline is not "in-place is free" — it is that in-place never copies the ~596 MB payload, so it
+writes ~128 MB where `--out` writes ~1.32 GB, and needs ~64 MB of spare disk where `--out` needs
+~661 MB.
 
 ## Acceptance
 
