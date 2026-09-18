@@ -77,6 +77,23 @@ internal static class CntReseal
             physical.First(e => e.Id == EntryKeysId).DataSize == PublisherEntryKeysSize ? 0x10000UL : 0x80000UL;
         ulong bodySize = Align(num, bodyAlignment) - bodyOffset;
 
+        // The twelve steps maintain the layout scalars and the digest chain, and nothing else. A
+        // body_size change also moves the container end, so cnt_region_size, package_size,
+        // mount_image_size, promote_size and pfs_image_offset would all have to be recomputed —
+        // and pfs_image_offset in particular cannot simply be re-derived here, because a finalized
+        // package stores the FIH-relative 0x10000 rather than the physical offset the builder
+        // first writes. Carrying them through stale would be a silent geometry inconsistency, so
+        // refuse loudly instead. This is the unimplemented body_size-bump path from the spec.
+        ulong originalBodySize = CntHeader.U64(cnt, CntHeader.BodySize);
+        if (bodySize != originalBodySize)
+        {
+            throw new InvalidOperationException(
+                $"the resealed body_size changed from 0x{originalBodySize:X} to 0x{bodySize:X}; " +
+                "this reseal maintains only the fields in its twelve steps, and a body_size change " +
+                "also requires cnt_region_size, package_size, mount_image_size, promote_size and " +
+                "pfs_image_offset to be recomputed — the body_size-bump path is not implemented.");
+        }
+
         var outCnt = new byte[checked((int)(bodyOffset + bodySize))];
         // Header region verbatim; everything from body_offset on is rewritten below. The body is
         // left zero-filled first: the builder writes into a freshly SetLength'd file, so inter-entry

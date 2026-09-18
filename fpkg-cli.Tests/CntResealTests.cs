@@ -72,6 +72,45 @@ public class CntResealTests
         Bytes.AssertEqual(r.Cnt, back);
     }
 
+    /// <summary>
+    /// The ONLY coverage of re-encryption at a new offset. An encrypted entry's AES key and IV are
+    /// derived from its 32-byte meta record, which contains DataOffset — so an entry that moves
+    /// must be re-encrypted, never copied. Fixed point 3 cannot show this: all five encrypted
+    /// entries sit physically ahead of 4097, so nothing there shifts them, and the real repair
+    /// never will either. Entry 8192 (param.json) is seventh in physical order, ahead of all five,
+    /// so perturbing it drags every encrypted entry to a new offset. The test asserts that
+    /// movement explicitly, so it cannot silently stop exercising the path it exists for.
+    /// </summary>
+    [SkippableFact]
+    public void MovingAnEntryReEncryptsTheEncryptedEntriesAtTheirNewOffsets()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var r = PackageRegions.Load(TestPackage.Path);
+        var contentId = ProsperoPkgReader.Read(TestPackage.Path).Header.ContentId;
+
+        var grown = CntEntryTable.Parse(r.Cnt, Passcode);
+        var encrypted = grown.Physical.Where(e => e.Encrypted).ToList();
+        Assert.NotEmpty(encrypted);
+        var offsetsBefore = encrypted.Select(e => e.DataOffset).ToList();
+
+        var target = grown[8192];
+        var original = target.Payload;
+        target.Payload = [.. original, .. new byte[1000]];
+
+        var bigger = CntReseal.Seal(r.Cnt, grown.Physical, contentId, Passcode);
+
+        // The whole point of this test: at least one entry whose ciphertext depends on its offset
+        // actually landed somewhere else, so the bytes below could only round-trip by being
+        // re-encrypted against the new meta record.
+        Assert.NotEqual(offsetsBefore, encrypted.Select(e => e.DataOffset).ToList());
+
+        var shrunk = CntEntryTable.Parse(bigger, Passcode);
+        shrunk[8192].Payload = original;
+        var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, Passcode);
+
+        Bytes.AssertEqual(r.Cnt, back);
+    }
+
     private static void Region(string stage, byte[] want, byte[] got, int off, int len)
     {
         for (int i = 0; i < len; i++)
