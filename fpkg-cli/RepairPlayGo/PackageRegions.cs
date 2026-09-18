@@ -5,9 +5,9 @@ namespace Fpkg.Cli.RepairPlayGo;
 /// <summary>
 /// A finalized .pkg split into its three regions: the outer PFS (never materialised — only its
 /// offset/size are kept), the embedded CNT container, and the trailing SI segment (empty when the
-/// package has none). <see cref="Load"/> discovers the boundaries; <see cref="WriteTo"/> splices
-/// a (possibly modified) CNT and SI back onto the original outer PFS bytes without ever holding
-/// the ~600 MB payload in memory.
+/// package has none). <see cref="Load"/> discovers the boundaries and reads only those two small
+/// regions; <see cref="WriteTo"/> splices a (possibly modified) CNT and SI back onto the original
+/// outer PFS bytes without ever holding the ~600 MB payload in memory.
 /// </summary>
 internal sealed record PackageRegions(
     string SourcePath,
@@ -18,38 +18,76 @@ internal sealed record PackageRegions(
     byte[] Si)             // empty array when the package has no SI segment
 {
     /// <summary>
-    /// Reads the FIH to find the embedded CNT offset, then uses
-    /// <see cref="ProsperoPackageArchive.Split"/> to pull out the CNT and SI regions. The outer
-    /// PFS is discarded into <see cref="Stream.Null"/> rather than buffered — at ~600 MB it is by
-    /// far the largest of the three regions and <see cref="WriteTo"/> only ever needs to copy it
-    /// byte for byte from the source file, never decode it.
+    /// Reads the FIH to confirm the package is finalized, asks
+    /// <see cref="ProsperoPackageArchive.Inspect"/> for the region geometry, then reads ONLY the
+    /// CNT and SI ranges back with explicit seeks.
+    /// <para>
+    /// It deliberately does NOT use <c>ProsperoPackageArchive.Split</c>. Split copies the outer
+    /// PFS too, and passing <see cref="Stream.Null"/> as its destination discards the writes but
+    /// not the reads — it still pulls the whole ~600 MB payload (on a 90 GB package, 90 GB) off
+    /// disk to throw it away, on every run including <c>--dry-run</c>. The outer PFS is never
+    /// decoded here and <see cref="WriteTo"/> copies it byte for byte straight from the source
+    /// file, so nothing needs to read it at load time.
+    /// </para>
     /// </summary>
-    internal static PackageRegions Load(string packagePath, Progress? progress = null)
+    internal static PackageRegions Load(string packagePath, Progress? progress = null) =>
+        Load(packagePath, progress, static path => File.OpenRead(path));
+
+    /// <summary>
+    /// The body of <see cref="Load"/> with the source stream's construction injected, so a test can
+    /// interpose a byte-counting stream and assert that the payload is not read. Production code
+    /// calls the two-argument overload.
+    /// </summary>
+    internal static PackageRegions Load(string packagePath, Progress? progress,
+                                        Func<string, Stream> openSourceStream)
     {
         var pkg = ProsperoPkgReader.Read(packagePath);
         if (pkg.Fih is null)
             throw new InvalidDataException(
                 "the file has no FIH header, so it carries no embedded CNT region; repair-playgo needs a finalized package");
-        long cntOffset = (long)pkg.Fih.EmbeddedCntOffset;
 
-        using var file = File.OpenRead(packagePath);
-        // Split walks the WHOLE file — the outer PFS goes to Stream.Null — so the read position is
-        // the only honest progress signal available here, and on a 661 MB package it is the whole
-        // reason this stage is slow. Observation only: ReadingProgress forwards every call.
-        using var input = progress is null
-            ? (Stream)file
-            : new ReadingProgressStream(file, progress);
-        using var cnt = new MemoryStream();
-        using var si = new MemoryStream();
-        ProsperoPackageArchive.Split(input, Stream.Null, cnt, si);
+        using var input = openSourceStream(packagePath);
+        var map = ProsperoPackageArchive.Inspect(input);
+
+        // The stage's real work is exactly these two ranges, so that — not the file position, which
+        // starts at ~99.9% of a large package the moment we seek to the CNT — is what drives the bar.
+        long expected = map.CntSize + map.SupplementSize;
+        long done = 0;
+        byte[] cnt = ReadRange(input, map.CntOffset, map.CntSize, "CNT", progress, ref done, expected);
+        byte[] si = ReadRange(input, map.SupplementOffset, map.SupplementSize, "SI", progress, ref done, expected);
 
         return new PackageRegions(
             packagePath,
-            OuterPfsOffset: 0x10000,
-            OuterPfsSize: cntOffset - 0x10000,
-            CntOffset: cntOffset,
-            Cnt: cnt.ToArray(),
-            Si: si.ToArray());
+            OuterPfsOffset: map.OuterPfsOffset,
+            OuterPfsSize: map.OuterPfsSize,
+            CntOffset: map.CntOffset,
+            Cnt: cnt,
+            Si: si);
+    }
+
+    /// <summary>
+    /// Reads <paramref name="size"/> bytes from <paramref name="offset"/> in 80 KiB steps, counting
+    /// them towards the stage's own total. A zero-length region (a package with no SI) reads nothing.
+    /// </summary>
+    private static byte[] ReadRange(Stream input, long offset, long size, string what,
+                                    Progress? progress, ref long done, long expected)
+    {
+        if (size <= 0)
+            return [];
+
+        var buffer = new byte[checked((int)size)];
+        input.Seek(offset, SeekOrigin.Begin);
+        int filled = 0;
+        while (filled < buffer.Length)
+        {
+            int n = input.Read(buffer, filled, Math.Min(81920, buffer.Length - filled));
+            if (n <= 0)
+                throw new EndOfStreamException($"package truncated inside the {what} region");
+            filled += n;
+            done += n;
+            progress?.Report(done, expected);
+        }
+        return buffer;
     }
 
     /// <summary>

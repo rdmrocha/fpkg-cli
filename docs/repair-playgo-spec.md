@@ -228,6 +228,11 @@ Public and usable directly: `ProsperoPackageArchive.Split` / `Inspect` / `TryRea
 `ProsperoSiArchive.BuildMembers` / `WriteZip`, `ProsperoPlayGo.BuildChunkCrc` /
 `BuildLanguageChunkLayout` / `BuildMultiChunkDat` / `ValidateLayout`.
 
+Caveat on `Split`: it copies all three regions, and a `Stream.Null` destination discards the writes
+but not the reads — it still pulls the whole outer PFS off disk. For the CNT and SI alone, use
+`Inspect` for the geometry and read those two ranges directly; that is what `PackageRegions.Load`
+does, and on a 90 GB package it is the difference between ~90 GB of I/O and ~64 MB.
+
 Caveat on `ProsperoPlayGo`: `BuildLanguageChunkLayout` is public but returns the **internal** nested
 record `LanguageChunkLayout`, and `ReadChunkCounts` / `ReadScenarioMetadata` likewise return internal
 types. C# cannot name them, so those three calls and their result properties go through reflection —
