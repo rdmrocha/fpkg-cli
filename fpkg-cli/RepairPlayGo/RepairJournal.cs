@@ -13,8 +13,17 @@ namespace Fpkg.Cli.RepairPlayGo;
 /// An in-place repair writes the repaired CNT straight into its own footprint, so there is a
 /// window (roughly the ~660 MB CRC pass) in which the file on disk carries a repaired CNT and a
 /// stale SI: a damaged package. The journal closes that window. It is written and flushed to the
-/// device <em>before</em> the package is opened for writing and deleted only once the repair has
-/// completed, so a journal found on disk always means "an interrupted repair, undoable".
+/// device <em>before</em> the package is opened for writing, and deleting it is the repair's last
+/// act — so a journal found on disk means the write was interrupted, OR that it completed and the
+/// deletion itself failed. Those two are told apart by the file's length; see
+/// <see cref="RepairPlayGoCommand.RecoverIfNeeded"/>.
+/// </para>
+///
+/// <para>
+/// The journal can be placed anywhere (<c>--work-dir</c>), which is a problem of its own: a later
+/// run computing the path from ITS flags would look in the wrong place, find nothing, and report a
+/// half-written package as healthy. <see cref="MarkerPathFor"/> closes that — a tiny marker file
+/// always beside the package, recording where the journal went.
 /// </para>
 ///
 /// <para>On-disk layout — all integers little-endian:</para>
@@ -34,6 +43,11 @@ internal sealed record RepairJournal(
     long TargetLength, long CntOffset, long CntLength, long SiLength, byte[] Identity)
 {
     internal const string Suffix = ".repair-playgo.journal";
+
+    /// <summary>
+    /// The in-progress marker's suffix. Always beside the package, never in <c>--work-dir</c>.
+    /// </summary>
+    internal const string MarkerSuffix = ".repair-playgo.inprogress";
 
     private static ReadOnlySpan<byte> Magic => "FPKGJRN1"u8;
 
@@ -67,6 +81,59 @@ internal sealed record RepairJournal(
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(target)));
         return Path.Combine(workDir,
                             $"{Path.GetFileName(target)}.{Convert.ToHexString(digest)[..16].ToLowerInvariant()}{Suffix}");
+    }
+
+    /// <summary>
+    /// The in-progress marker for <paramref name="target"/>: <c>&lt;package&gt;.repair-playgo.inprogress</c>,
+    /// ALWAYS beside the package. It takes no <c>workDir</c> on purpose — a marker that moved with
+    /// the journal would be exactly as findable as the journal, which is to say not findable at all.
+    /// </summary>
+    internal static string MarkerPathFor(string target) =>
+        Path.Combine(Path.GetDirectoryName(target) ?? ".",
+                     Path.GetFileName(target) + MarkerSuffix);
+
+    /// <summary>
+    /// Records, beside the package, where this run's journal lives, and flushes it to the device
+    /// before returning — the caller writes the journal next, and a marker still sitting in the page
+    /// cache would not survive the failure the whole mechanism exists for.
+    ///
+    /// <para>
+    /// WHY IT EXISTS. Without it, recovery can only recompute the journal's path from the flags of
+    /// the run that happens to be recovering. Any of the ordinary ways those differ — the journal
+    /// was under <c>--work-dir /tmp</c> and the reboot cleared <c>/tmp</c>; the user forgot the flag;
+    /// the user passed a different one — makes the journal invisible. Recovery then finds nothing,
+    /// the detector reads entries 4097/8209 out of the already-REPAIRED CNT, sees nothing wrong, and
+    /// the command prints "Nothing to repair" and exits 0 on a package whose SI is stale. That is
+    /// silent, undetectable data loss, and it is the failure the journal was supposed to prevent.
+    /// The marker makes the mid-repair state impossible to miss even when the recovery data is gone.
+    /// </para>
+    /// </summary>
+    internal static void WriteMarker(string markerPath, string journalPath)
+    {
+        using var marker = new FileStream(markerPath, FileMode.Create, FileAccess.Write,
+                                          FileShare.None);
+        marker.Write(Encoding.UTF8.GetBytes(Path.GetFullPath(journalPath)));
+        marker.Flush(flushToDisk: true);
+    }
+
+    /// <summary>
+    /// The journal path a marker records, or null when there is no marker. An unreadable or empty
+    /// marker reads as absent: it cannot name a journal, so it cannot redirect recovery — and
+    /// <see cref="RepairPlayGoCommand.RecoverIfNeeded"/>'s own <c>File.Exists</c> check still
+    /// refuses the run, so nothing is quietly waved through.
+    /// </summary>
+    internal static string? ReadMarker(string markerPath)
+    {
+        try
+        {
+            string recorded = File.ReadAllText(markerPath).Trim();
+            return recorded.Length == 0 ? null : recorded;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException
+                                    or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -228,6 +295,14 @@ internal sealed record RepairJournal(
 
             long expected = HeaderLength + cntLength + siLength + DigestLength;
             if (journal.Length != expected) return null;
+
+            // The regions must fit inside the package the journal claims to describe. Restore seeks
+            // to CntOffset and writes CntLength + SiLength bytes, then truncates to TargetLength, so
+            // a journal declaring more than fits would write past the length it then cuts back to —
+            // silently discarding part of its own recovery data. Subtraction rather than addition:
+            // the lengths are bounded by the file's real size above, but CntOffset is not, and
+            // cntOffset + cntLength + siLength could overflow.
+            if (cntOffset > targetLength - (cntLength + siLength)) return null;
 
             // Digest last: it costs a full read of the payload, and a length or magic mismatch
             // already disqualifies the file for free.

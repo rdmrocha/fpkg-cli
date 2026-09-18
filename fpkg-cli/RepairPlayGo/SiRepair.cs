@@ -53,6 +53,50 @@ internal static class SiRepair
     }
 
     /// <summary>
+    /// Every structural condition <see cref="Rebuild"/> needs of the SI's member set, in one place
+    /// so it can be asked BEFORE anything is written as well as at the point of use.
+    ///
+    /// <para>
+    /// The separation is the point. Under <c>--in-place</c>, <see cref="Rebuild"/> runs only after
+    /// the repaired CNT has been spliced and fsynced, so every refusal it raises there lands on a
+    /// package that is already mid-repair. The command's guard 2 calls this on the members it has
+    /// already read, and those refusals then cost the user nothing at all.
+    /// </para>
+    /// <para>
+    /// <see cref="Rebuild"/> still calls it. Pre-screening is a convenience for the CLI, never the
+    /// enforcement: this class is not entitled to assume its caller asked first.
+    /// </para>
+    /// </summary>
+    internal static void EnsureRebuildable(IReadOnlyDictionary<string, byte[]> members)
+    {
+        if (members.ContainsKey(PfsImageXmlPath))
+            throw new InvalidDataException(
+                $"the SI segment carries '{PfsImageXmlPath}', which this repair cannot reproduce; refusing to rebuild it");
+
+        // TryGetValue, not the indexer: an indexer read of the FIRST path ran before the loop below
+        // could reach it, so a package missing only that one member died on a bare
+        // KeyNotFoundException and the loop's own message — which names the missing path — was
+        // unreachable for it.
+        byte[] napsMeta300 = members.TryGetValue(NapsMeta300Paths[0], out var first)
+            ? first
+            : throw new InvalidDataException($"the SI segment is missing '{NapsMeta300Paths[0]}'");
+        foreach (string path in NapsMeta300Paths)
+        {
+            if (!members.TryGetValue(path, out var blob))
+                throw new InvalidDataException($"the SI segment is missing '{path}'");
+            // BuildMembers emits ONE blob at all four paths, so collapsing them is only correct
+            // while they really are identical. Verified here rather than assumed.
+            if (!blob.AsSpan().SequenceEqual(napsMeta300))
+                throw new InvalidDataException(
+                    $"'{path}' differs from '{NapsMeta300Paths[0]}'; the four naps_meta_3xx members are not " +
+                    "interchangeable in this package, so the SI cannot be rebuilt from a single blob");
+        }
+
+        if (!members.ContainsKey(NapsMeta18Path))
+            throw new InvalidDataException($"the SI segment is missing '{NapsMeta18Path}'");
+    }
+
+    /// <summary>
     /// Rebuilds the SI zip with the new playgo-chunk.dat and a CRC table recomputed over the
     /// repaired mount image (FIH + outer PFS + CNT).
     /// </summary>
@@ -75,27 +119,10 @@ internal static class SiRepair
                                    Progress progress)
     {
         var members = ReadMembers(si);
-
-        if (members.ContainsKey(PfsImageXmlPath))
-            throw new InvalidDataException(
-                $"the SI segment carries '{PfsImageXmlPath}', which this repair cannot reproduce; refusing to rebuild it");
+        EnsureRebuildable(members);
 
         byte[] napsMeta300 = members[NapsMeta300Paths[0]];
-        foreach (string path in NapsMeta300Paths)
-        {
-            if (!members.TryGetValue(path, out var blob))
-                throw new InvalidDataException($"the SI segment is missing '{path}'");
-            // BuildMembers emits ONE blob at all four paths, so collapsing them is only correct
-            // while they really are identical. Verified here rather than assumed.
-            if (!blob.AsSpan().SequenceEqual(napsMeta300))
-                throw new InvalidDataException(
-                    $"'{path}' differs from '{NapsMeta300Paths[0]}'; the four naps_meta_3xx members are not " +
-                    "interchangeable in this package, so the SI cannot be rebuilt from a single blob");
-        }
-
-        byte[] napsMeta18 = members.TryGetValue(NapsMeta18Path, out var meta18)
-            ? meta18
-            : throw new InvalidDataException($"the SI segment is missing '{NapsMeta18Path}'");
+        byte[] napsMeta18 = members[NapsMeta18Path];
 
         byte[] playGoChunkCrc =
             ProsperoPlayGo.BuildChunkCrc(repairedMountImage, mountImageLength,

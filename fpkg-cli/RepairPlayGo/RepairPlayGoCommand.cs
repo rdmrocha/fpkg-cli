@@ -16,8 +16,18 @@ namespace Fpkg.Cli.RepairPlayGo;
 /// given, and even then every refusal point has already run: the six NUMBERED guards below plus
 /// two structural preconditions — a package with no SI segment, and <c>CntRepair</c>'s
 /// requirement that the CNT region carry no padding past the end of its body. Eight in all, and
-/// the whole repair is computed in memory first, so a refusal can never leave a half-written
-/// package behind.
+/// the whole repair is computed in memory first.
+/// </para>
+///
+/// <para>
+/// <b>That does NOT mean a refusal can never leave a half-written package behind.</b> It is true
+/// of <c>--out</c>, which writes to a staging file and renames. It is NOT true of
+/// <c>--in-place</c>: step 3 of <see cref="InPlaceWriter.Write"/> rebuilds the SI only after the
+/// repaired CNT has been spliced and fsynced, so anything that fails from there on — an I/O error,
+/// a full disk, the SI-growth guard, or a <c>SiRepair</c> refusal — lands on a package that is
+/// already mid-repair. That is what the journal is for, and those refusals say so explicitly.
+/// Guard 2 pre-screens every SI condition it can reach cheaply, precisely to keep the number of
+/// refusals that can land there as small as possible.
 /// </para>
 ///
 /// <para>
@@ -214,6 +224,12 @@ internal static class RepairPlayGoCommand
     /// </para>
     ///
     /// <para>
+    /// Under <paramref name="toOutFile"/> a handled journal still returns NON-ZERO: recovery stops
+    /// the run, so an <c>--out</c> invocation that took this path produced no output file, and
+    /// exiting 0 would tell a shell <c>&amp;&amp;</c> chain otherwise.
+    /// </para>
+    ///
+    /// <para>
     /// Under <paramref name="dryRun"/> it only reports. "A dry run writes nothing" is a property
     /// users rely on to inspect a package safely, and recovery is the one thing here that would
     /// otherwise mutate a file before the mode was ever consulted — it runs ahead of every guard by
@@ -222,10 +238,39 @@ internal static class RepairPlayGoCommand
     /// </para>
     /// </summary>
     internal static int RecoverIfNeeded(string target, string? workDir, Progress progress,
-                                        bool dryRun = false)
+                                        bool dryRun = false, bool toOutFile = false)
     {
-        string journalPath = RepairJournal.PathFor(target, workDir);
+        // THE MARKER FIRST, and its path is the only one here that does not depend on this run's
+        // flags. Recomputing the journal path from --work-dir is right only when the recovering run
+        // is given the same flags as the run that crashed, which is not something to rely on: /tmp
+        // is cleared on reboot, and the flag is easy to forget or to change. When that recomputed
+        // path came up empty the command fell through to the detector, which reads entries
+        // 4097/8209 out of the already-REPAIRED CNT, found nothing wrong, printed "Nothing to
+        // repair" and exited 0 — on a package with a stale SI. The marker is written beside the
+        // package before the journal is, so it is found whatever flags this run carries.
+        string markerPath = RepairJournal.MarkerPathFor(target);
+        bool markerPresent = File.Exists(markerPath);
+        string? recorded = markerPresent ? RepairJournal.ReadMarker(markerPath) : null;
+
+        string journalPath = recorded ?? RepairJournal.PathFor(target, workDir);
         var journal = RepairJournal.TryRead(journalPath);
+
+        // A marker with no usable journal is the unrecoverable case, and the one that must never be
+        // quiet. The package was left mid-repair and the data that would undo it is gone. There is
+        // nothing safe to do, so this says exactly that and stops — it does not "helpfully" fall
+        // through to a detector that would call the package healthy.
+        if (markerPresent && journal is null)
+            return Program.Fail(
+                $"'{target}' was left MID-REPAIR by an interrupted in-place run, and its recovery " +
+                $"journal is gone. The marker '{markerPath}' records the journal as having been at " +
+                $"'{journalPath}'; there is no readable journal there now. The package is NOT in a " +
+                "usable state — it carries a repaired CNT with a stale SI — and it cannot be " +
+                "restored from here, because the only copy of its original CNT and SI was in that " +
+                "journal. If you still have the journal (a --work-dir that was cleared on reboot is " +
+                "the usual cause), put it back at that path and re-run. Otherwise restore the " +
+                "package from a backup. Do not delete the marker: it is the only remaining record " +
+                "that this package is damaged.");
+
         // Absent, foreign, truncated or torn: nothing this can safely undo. A file that is present
         // but unreadable is deliberately NOT deleted here — it is not ours to destroy, and
         // InPlaceWriter refuses on File.Exists alone, so the run still stops with a message naming
@@ -287,13 +332,14 @@ internal static class RepairPlayGoCommand
         if (actualLength != journal.TargetLength)
         {
             File.Delete(journalPath);
+            DeleteMarker(markerPath);
             Console.WriteLine($"Package: {target}");
             Console.WriteLine("A repair journal was left behind by a repair that DID complete " +
                               $"(the package is {actualLength:N0} bytes, not the pre-repair " +
                               $"{journal.TargetLength:N0}).");
             Console.WriteLine("The journal has been removed. The package itself was not touched — " +
                               "restoring it would have undone a successful repair.");
-            return 0;
+            return OutFileWasNotProduced(toOutFile, restored: false);
         }
 
         RepairJournal.Restore(journalPath, target, progress);
@@ -301,6 +347,7 @@ internal static class RepairPlayGoCommand
         // Only after the restore is on the device: while the journal exists the recovery is
         // repeatable, and deleting it first would make an interrupted recovery unrecoverable.
         File.Delete(journalPath);
+        DeleteMarker(markerPath);
 
         Console.WriteLine($"Package: {target}");
         Console.WriteLine("A previous in-place repair of this package was interrupted before it " +
@@ -308,7 +355,48 @@ internal static class RepairPlayGoCommand
         Console.WriteLine("The package has been restored to its pre-repair state and the journal " +
                           "removed.");
         Console.WriteLine("Nothing else was done. Re-run the repair when you are ready.");
-        return 0;
+        return OutFileWasNotProduced(toOutFile, restored: true);
+    }
+
+    /// <summary>
+    /// Best effort, and deliberately: the marker is a signpost, not recovery data. Failing to remove
+    /// it after a successful recovery must not turn that success into an error — the next run finds
+    /// a marker with no journal and refuses, which is noisy but safe, whereas failing the recovery
+    /// itself would leave a package that IS recoverable looking as though it is not.
+    /// </summary>
+    private static void DeleteMarker(string markerPath)
+    {
+        try { File.Delete(markerPath); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine(
+                $"warning: could not remove the marker '{markerPath}': {ex.Message}. Delete it by " +
+                "hand, or the next run will refuse believing this package is still mid-repair.");
+        }
+    }
+
+    /// <summary>
+    /// Recovery's exit code. Zero when the run had nothing else to deliver, NON-ZERO under
+    /// <c>--out</c>: recovery acts and then stops, so that run produced no <c>--out</c> file at all.
+    /// Returning 0 made <c>fpkg repair-playgo … --out FIXED.pkg &amp;&amp; install FIXED.pkg</c>
+    /// proceed onto a file that was never written — or, worse, a stale one from an earlier run. It
+    /// matches what the <c>--dry-run</c> branch above already does, and for the same reason.
+    /// </summary>
+    private static int OutFileWasNotProduced(bool toOutFile, bool restored)
+    {
+        if (!toOutFile)
+            return 0;
+
+        Console.Error.WriteLine(
+            "error: NO --out file was produced. This run did nothing but deal with the repair " +
+            "journal left behind by an earlier --in-place run, and it stops there rather than " +
+            "carrying on with a repair." +
+            (restored
+                ? " Note that the INPUT package was modified: it has been restored to its " +
+                  "pre-repair state, which is the only thing that could safely be done with it."
+                : " The input package was not modified."));
+        Console.Error.WriteLine("error: re-run the command to produce the --out file.");
+        return 1;
     }
 
     /// <summary>
@@ -348,7 +436,8 @@ internal static class RepairPlayGoCommand
         // chosen — the two must not disagree about the mode.
         int recovery = RecoverIfNeeded(path, workDir,
                                        new Progress(Console.Out, verbose, isTty, RecoveryStages),
-                                       dryRun: target is null);
+                                       dryRun: target is null,
+                                       toOutFile: target is not null && !inPlace);
         if (recovery >= 0)
             return recovery;
 
@@ -361,6 +450,14 @@ internal static class RepairPlayGoCommand
         // PackageRegions.Load and CntEntryTable.Parse each take seconds on a 661 MB package, and
         // until this line moved ahead of them the command sat silent through all three.
         Console.WriteLine($"Package:    {path}");
+
+        // UNCONDITIONAL, not under --verbose. If the run is interrupted, this line is the user's
+        // record of where the recovery data went — and the moment they most need it is the moment
+        // they can no longer ask the command. The marker beside the package records the same path
+        // for the machine's benefit; this records it for the human's.
+        string? journalPath = inPlace ? RepairJournal.PathFor(path, workDir) : null;
+        if (journalPath is not null)
+            Console.WriteLine($"Journal:    {journalPath}");
 
         int Refuse(string message)
         {
@@ -394,7 +491,18 @@ internal static class RepairPlayGoCommand
                 "damage would appear only on a console. Pass the package's real --passcode.");
 
         // ---- Nothing to repair -----------------------------------------------------------
+        // GATED ON THE MARKER, belt and braces. RecoverIfNeeded above already refuses whenever a
+        // marker is present, so this cannot normally be reached with one on disk — but "Nothing to
+        // repair, exit 0" is the single most dangerous sentence this command can print, because a
+        // package left mid-repair reads as healthy here (the detector inspects the already-repaired
+        // CNT). It must be impossible to reach it on a damaged package by any route.
         var problem = Program.PlayGoInitialChunkProblem(path, passcode);
+        if (problem is null && File.Exists(RepairJournal.MarkerPathFor(path)))
+            return Refuse(
+                $"'{path}' looks repaired, but the marker " +
+                $"'{RepairJournal.MarkerPathFor(path)}' says an in-place repair of it is still in " +
+                "progress. A package interrupted mid-repair looks exactly like this — its CNT is " +
+                "repaired and its SI is stale — so this refuses rather than reporting it healthy.");
         if (problem is null)
         {
             progress.Finish();
@@ -442,6 +550,13 @@ internal static class RepairPlayGoCommand
                 $"the SI segment carries '{SiRepair.PfsImageXmlPath}', which encodes the full entry " +
                 "table and every digest. Reproducing it is unverified, so the repair would leave " +
                 "the package describing itself incorrectly.");
+        // EVERY remaining structural condition SiRepair.Rebuild needs, asked here rather than only
+        // there. Rebuild runs at step 3 of an in-place write — after the repaired CNT is on the
+        // device — so a missing naps_meta_18 or a mismatched naps_meta_3xx discovered inside it is a
+        // refusal that lands on an already-mutated package. Discovered here it costs nothing. The
+        // members are the ones already read above, so this adds no I/O.
+        try { SiRepair.EnsureRebuildable(siMembers); }
+        catch (InvalidDataException ex) { return Refuse(ex.Message); }
 
         // ---- Guard 4: generic scenario presentation --------------------------------------
         progress.Stage("recovering PlayGo values");
@@ -482,8 +597,7 @@ internal static class RepairPlayGoCommand
         // both. --in-place rewrites the package itself under a journal, needing no free space
         // beside it and leaving no temporary file; --out stages into a temporary and renames.
         if (inPlace)
-            InPlaceWriter.Write(regions, repaired, contentId, target,
-                                RepairJournal.PathFor(target, workDir), progress);
+            InPlaceWriter.Write(regions, repaired, contentId, target, journalPath!, progress);
         else
             WriteRepaired(regions, repaired, contentId, target, workDir: workDir,
                           progress: progress);
