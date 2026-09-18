@@ -8,7 +8,8 @@ public class CntEntryTableTests
     public void ParsesTheKnownEntryTable()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        // This package's passcode happens to be 32 zeros — not a property of the format.
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, new string('0', 32));
 
         Assert.Equal(27, t.Physical.Count);
         Assert.Equal([16u, 32u, 128u, 256u, 1u, 512u, 8192u], t.Physical.Take(7).Select(e => e.Id));
@@ -26,8 +27,9 @@ public class CntEntryTableTests
     public void PayloadsRoundTripAgainstTheLibrarysOwnReader()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        // This package's passcode happens to be 32 zeros — not a property of the format.
         var passcode = new string('0', 32);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, passcode);
         foreach (uint id in new uint[] { 4097, 8208, 8209, 12288, 8192 })
         {
             var expected = ProsperoPackageArchive.TryReadCntEntry(TestPackage.Path, passcode, id);
@@ -40,7 +42,8 @@ public class CntEntryTableTests
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
-        var t = CntEntryTable.Parse(cnt);
+        // This package's passcode happens to be 32 zeros — not a property of the format.
+        var t = CntEntryTable.Parse(cnt, new string('0', 32));
         int table = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
         foreach (var (e, i) in t.ById.Select((e, i) => (e, i)))
         {

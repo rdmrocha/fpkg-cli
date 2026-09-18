@@ -47,10 +47,6 @@ internal sealed class CntEntryTable
 {
     private const uint EntryNamesId = 512;
 
-    // Homebrew packages carry no real DRM passcode; this is the fixed all-zero passcode used
-    // throughout the CNT entry encryption for such packages.
-    private static readonly string ZeroPasscode = new('0', 32);
-
     private readonly Dictionary<uint, CntEntry> _byId;
 
     /// <summary>Entries in PHYSICAL (pkg.Entries) order — ascending DataOffset.</summary>
@@ -68,10 +64,12 @@ internal sealed class CntEntryTable
 
     internal CntEntry this[uint id] => _byId[id];
 
-    internal static CntEntryTable Parse(byte[] cnt)
+    internal static CntEntryTable Parse(byte[] cnt, string passcode)
     {
         uint entryCount = CntHeader.U32(cnt, CntHeader.EntryCount);
         int tableOffset = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
+        // Authoritative: this is the same value the builder used when it derived the entry
+        // encryption keys, and it lives inside the bytes we are parsing.
         string contentId = Encoding.ASCII.GetString(cnt, CntHeader.ContentId, 36).TrimEnd('\0');
 
         // The table on disk is already sorted ascending by id, so reading it sequentially
@@ -115,7 +113,7 @@ internal sealed class CntEntryTable
                     id = (EntryId)e.Id, NameTableOffset = e.NameTableOffset,
                     Flags1 = e.Flags1, Flags2 = e.Flags2, DataOffset = e.DataOffset, DataSize = e.DataSize,
                 };
-                e.Payload = Entry.Decrypt(e.StoredPayload, contentId, ZeroPasscode, meta, publisherProfile: true);
+                e.Payload = Entry.Decrypt(e.StoredPayload, contentId, passcode, meta, publisherProfile: true);
             }
             else
             {
