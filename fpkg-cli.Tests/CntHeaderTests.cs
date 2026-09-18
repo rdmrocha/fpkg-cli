@@ -48,12 +48,29 @@ public class CntHeaderTests
         Assert.Contains(cnt.AsSpan(CntHeader.PfsImageDigest, 32).ToArray(), b => b != 0);
     }
 
+    /// <summary>
+    /// Establishes that the package digest at offset 4064 is SHA3-256 over <c>cnt[0..4064)</c>,
+    /// with the BE64 field at <see cref="CntHeader.PfsImageOffset"/> forced to 65536 first — the
+    /// same preimage construction the production reseal (a later task) performs, because it
+    /// mirrors what <c>FinishContainer</c> does and costs nothing to include here.
+    ///
+    /// On this on-disk, finalized test package the field is already 0x10000, so the force below
+    /// is a no-op: this test cannot and does not prove the force is necessary. It only proves the
+    /// preimage/algorithm are otherwise correct. The precondition assertion makes that fact
+    /// explicit rather than silently relying on it.
+    /// </summary>
     [SkippableFact]
     public void ThePackageDigestAtOffset4064IsWhatTheLibraryComputes()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
         var preimage = cnt[..4064];
+
+        // Already finalized to the FIH-relative value in an on-disk package, which is why the
+        // force below cannot change the preimage. If this ever fails, the force has become
+        // load-bearing and this test's reasoning needs revisiting.
+        Assert.Equal(65536UL, CntHeader.U64(cnt, CntHeader.PfsImageOffset));
+
         BinaryPrimitives.WriteUInt64BigEndian(preimage.AsSpan(CntHeader.PfsImageOffset, 8), 65536ul);
         Assert.Equal(
             Convert.ToHexString(ProsperoImageDigests.ComputePackageDigest(preimage)),
