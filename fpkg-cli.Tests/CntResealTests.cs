@@ -27,7 +27,8 @@ public class CntResealTests
         // offset; these report the STAGE, which is what you actually need at 3am.
         Region("header",          r.Cnt, resealed, 0, 0x2000);
         Region("meta table",      r.Cnt, resealed,
-               (int)CntHeader.U32(r.Cnt, CntHeader.EntryTableOffset), 27 * 32);
+               (int)CntHeader.U32(r.Cnt, CntHeader.EntryTableOffset),
+               (int)CntHeader.U32(r.Cnt, CntHeader.EntryCount) * 32);
         Entry ("DIGESTS",         r.Cnt, resealed, t, 1);
         Entry ("GENERAL_DIGESTS", r.Cnt, resealed, t, 128);
         Entry ("METAS",           r.Cnt, resealed, t, 256);
@@ -51,7 +52,6 @@ public class CntResealTests
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var r = PackageRegions.Load(TestPackage.Path);
         var contentId = ProsperoPkgReader.Read(TestPackage.Path).Header.ContentId;
-        var passcode = new string('0', 32);
 
         // playgo-scenario.json (12288) is last in physical order; pad it so everything after it
         // in the body — nothing — moves, then pick a mid-list entry so plenty does.
@@ -61,13 +61,13 @@ public class CntResealTests
         target.Payload = [.. original, .. new byte[1000]];
         target.DataSize = (uint)target.Payload.Length;
 
-        var bigger = CntReseal.Seal(r.Cnt, grown.Physical, contentId, passcode);
-        Assert.NotEqual(Convert.ToHexString(r.Cnt), Convert.ToHexString(bigger));
+        var bigger = CntReseal.Seal(r.Cnt, grown.Physical, contentId, Passcode);
+        Assert.False(r.Cnt.AsSpan().SequenceEqual(bigger), "growing an entry must change the CNT");
 
         var shrunk = CntEntryTable.Parse(bigger, Passcode);
         shrunk[4097].Payload = original;
         shrunk[4097].DataSize = (uint)original.Length;
-        var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, passcode);
+        var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, Passcode);
 
         Bytes.AssertEqual(r.Cnt, back);
     }
@@ -98,6 +98,7 @@ public class CntResealTests
         target.Payload = [.. original, .. new byte[1000]];
 
         var bigger = CntReseal.Seal(r.Cnt, grown.Physical, contentId, Passcode);
+        Assert.False(r.Cnt.AsSpan().SequenceEqual(bigger), "growing an entry must change the CNT");
 
         // The whole point of this test: at least one entry whose ciphertext depends on its offset
         // actually landed somewhere else, so the bytes below could only round-trip by being
@@ -109,6 +110,86 @@ public class CntResealTests
         var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, Passcode);
 
         Bytes.AssertEqual(r.Cnt, back);
+    }
+
+    /// <summary>
+    /// The test that proves the layout SCALARS are recomputed rather than carried through. The
+    /// other fixed points cannot tell the difference: each is a round trip whose only oracle is
+    /// its endpoint, so the second Seal reads its header from the intermediate buffer and a scalar
+    /// that was copied from the input header instead of derived round-trips perfectly. At fixed
+    /// point 1's identity point, copy and recompute are equal by construction.
+    /// <para>
+    /// Entry 32 (IMAGE_KEY) is at physical index 1 — inside the first sc_entry_count-1 = 5 entries
+    /// that feed main_ent_data_size — and IMAGEDIGS (1034) is at physical index 14, so growing it
+    /// moves METAS, moves 1034, and changes desc_image_key_size: every identity-only scalar varies
+    /// in this one test. (ENTRY_KEYS at physical index 0 would be the other candidate, but its size
+    /// selects the body alignment, so growing it flips the 0x80000 branch and tests something else.)
+    /// </para>
+    /// </summary>
+    [SkippableFact]
+    public void GrowingAnScEntryRecomputesEveryLayoutScalar()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var r = PackageRegions.Load(TestPackage.Path);
+        var contentId = ProsperoPkgReader.Read(TestPackage.Path).Header.ContentId;
+
+        // The HeaderDigest slot of GENERAL_DIGESTS: 0x20 of record header, then the digest slots in
+        // enum order — Content(0), Game(1), Header(2).
+        const int HeaderDigestSlot = 0x20 + 2 * 32;
+        var originalGeneralDigests = CntEntryTable.Parse(r.Cnt, Passcode)[128].Payload;
+
+        var grown = CntEntryTable.Parse(r.Cnt, Passcode);
+        var original = grown[32].Payload;
+        grown[32].Payload = [.. original, .. new byte[1000]];
+
+        var bigger = CntReseal.Seal(r.Cnt, grown.Physical, contentId, Passcode);
+        Assert.False(r.Cnt.AsSpan().SequenceEqual(bigger), "growing an entry must change the CNT");
+
+        // Each of these would be identical if Seal had copied it from the input header.
+        Assert.NotEqual(CntHeader.U32(r.Cnt, CntHeader.MainEntDataSize),
+                        CntHeader.U32(bigger, CntHeader.MainEntDataSize));
+        Assert.NotEqual(CntHeader.U32(r.Cnt, CntHeader.EntryTableOffset),
+                        CntHeader.U32(bigger, CntHeader.EntryTableOffset));
+        Assert.NotEqual(CntHeader.U64(r.Cnt, CntHeader.MandatorySize),
+                        CntHeader.U64(bigger, CntHeader.MandatorySize));
+        Assert.NotEqual(CntHeader.U32(r.Cnt, CntHeader.DescMandatoryOffset),
+                        CntHeader.U32(bigger, CntHeader.DescMandatoryOffset));
+        Assert.NotEqual(CntHeader.U32(r.Cnt, CntHeader.DescImageKeySize),
+                        CntHeader.U32(bigger, CntHeader.DescImageKeySize));
+        // HeaderDigest covers CNT[0:0x40], so it moves with the scalars above.
+        Assert.False(
+            originalGeneralDigests.AsSpan(HeaderDigestSlot, 32)
+                .SequenceEqual(grown[128].Payload.AsSpan(HeaderDigestSlot, 32)),
+            "the general-digests HeaderDigest must follow the recomputed header scalars");
+
+        var shrunk = CntEntryTable.Parse(bigger, Passcode);
+        shrunk[32].Payload = original;
+        var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, Passcode);
+
+        Bytes.AssertEqual(r.Cnt, back);
+    }
+
+    /// <summary>
+    /// CntReseal zeroes each meta record's trailing 8 pad bytes rather than preserving them, which
+    /// is only safe because a builder-produced package has them zero — MetaEntry.Write skips those
+    /// bytes in an already-zeroed buffer. Pin that property of the input so the assumption cannot
+    /// rot silently.
+    /// </summary>
+    [SkippableFact]
+    public void EveryMetaRecordsTrailingPadBytesAreZero()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
+        int table = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
+        uint count = CntHeader.U32(cnt, CntHeader.EntryCount);
+
+        Assert.Equal(27u, count);
+        for (int i = 0; i < count; i++)
+        {
+            var pad = cnt.AsSpan(table + i * 32 + 24, 8);
+            Assert.True(pad.IndexOfAnyExcept((byte)0) < 0,
+                $"meta record {i} has non-zero trailing pad bytes {Convert.ToHexString(pad)}");
+        }
     }
 
     private static void Region(string stage, byte[] want, byte[] got, int off, int len)

@@ -45,8 +45,16 @@ internal static class CntReseal
 
     /// <summary>
     /// Rebuilds the CNT region from <paramref name="physical"/> in physical order and reseals every
-    /// digest in the chain. <paramref name="cnt"/> supplies the original header, which is patched
-    /// in place; it is not otherwise read.
+    /// digest in the chain, returning a NEW buffer. <paramref name="cnt"/> supplies the original
+    /// header region, which is copied and then patched in the copy; the input array is never
+    /// written to.
+    /// <para>
+    /// Side effect: the <see cref="CntEntry"/> instances in <paramref name="physical"/> ARE mutated
+    /// in place — <see cref="CntEntry.DataSize"/> is re-derived from <see cref="CntEntry.Payload"/>,
+    /// <see cref="CntEntry.DataOffset"/> is reassigned by the layout walk, and the three derived
+    /// payloads (METAS, DIGESTS, GENERAL_DIGESTS) are replaced. Callers can read the new layout back
+    /// off the list afterwards.
+    /// </para>
     /// </summary>
     internal static byte[] Seal(byte[] cnt, IReadOnlyList<CntEntry> physical,
                                string contentId, string passcode)
@@ -75,6 +83,9 @@ internal static class CntReseal
 
         ulong bodyAlignment =
             physical.First(e => e.Id == EntryKeysId).DataSize == PublisherEntryKeysSize ? 0x10000UL : 0x80000UL;
+        // LayOutEntries additionally clamps body_size to at least 0x1E000 for content type 34
+        // (PS5 AL / no-data). That class has no embedded CNT to repair, so this path is
+        // unreachable here and the clamp is deliberately omitted.
         ulong bodySize = Align(num, bodyAlignment) - bodyOffset;
 
         // The twelve steps maintain the layout scalars and the digest chain, and nothing else. A
@@ -119,10 +130,13 @@ internal static class CntReseal
         }
 
         // ---- 2. Meta table ----------------------------------------------------------------
-        // Sorted ascending by id. MetaEntry.Write skips the trailing 8 pad bytes rather than
-        // zeroing them, so the new table is built on top of the old one to preserve them.
+        // Sorted ascending by id, 24 meaningful bytes per record. MetaEntry.Write leaves each
+        // record's trailing 8 pad bytes untouched (`s.Position += 8`) rather than zeroing them; in
+        // a builder-produced package it writes into a zero-filled buffer, so those bytes are zero
+        // — verified for all 27 records of the test package by CntResealTests. The table is
+        // therefore built fresh (zero-filled) rather than carried over from the old one, which
+        // would have matched records positionally and gone silently wrong if the id set changed.
         var table = new byte[entryCount * 32];
-        metas.Payload.AsSpan(0, Math.Min(metas.Payload.Length, table.Length)).CopyTo(table);
         for (int i = 0; i < byId.Count; i++)
             byId[i].MetaBytes().AsSpan(0, 24).CopyTo(table.AsSpan(i * 32, 24));
         metas.Payload = table;
@@ -137,8 +151,11 @@ internal static class CntReseal
             WriteEntry(outCnt, e, contentId, passcode);
 
         // ---- 5. DIGESTS -------------------------------------------------------------------
-        // Slot 0 is DIGESTS itself and is never computed; it keeps whatever the payload held.
-        var digestTable = (byte[])digests.Payload.Clone();
+        // Sized from the live entry count, not the parsed payload, which would be short after an
+        // insert. Slot 0 is DIGESTS itself and is never computed; it keeps whatever the payload
+        // held (zero in a builder-produced package).
+        var digestTable = new byte[entryCount * 32];
+        digests.Payload.AsSpan(0, Math.Min(digests.Payload.Length, digestTable.Length)).CopyTo(digestTable);
         for (int i = 1; i < byId.Count; i++)
         {
             var e = byId[i];
