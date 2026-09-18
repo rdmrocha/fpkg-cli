@@ -55,6 +55,7 @@ internal static class Program
                 // deliberately so: PatchCommand is about to rewrite that very assembly.
                 // See the ordering note in PatchCommand.
                 "patch"  => PatchCommand.Run(args.Skip(1).ToArray()),
+                "repair-playgo" => RepairPlayGo.RepairPlayGoCommand.Run(args),
                 "api"    => Api(args),
                 var cmd  => Fail($"unknown command '{cmd}' (try: fpkg help)"),
             };
@@ -96,6 +97,10 @@ internal static class Program
                                         library in fpkg-tools/native/, skipped with a note
                                         when absent) and ffpfsc (container sources).
                                         --oodle alone FAILS if no Oodle library is present.
+          fpkg repair-playgo <file.pkg> [--passcode <32>] [--out <path>|--in-place] [--dry-run]
+                                        rewrites a 0.6.8-built package's PlayGo metadata to the
+                                        0.6.9 shape without touching the payload. Reports and
+                                        writes nothing unless --out or --in-place is given.
           fpkg extract <file.pkg> <dir> [--passcode <32>] [--raw] [--cnt] [--si]
                                         unpack the inner PPR-PFS files (default),
                                         --raw keeps files compressed, --cnt/--si add
@@ -499,7 +504,7 @@ internal static class Program
     ///
     /// Returns null when there is nothing to say.
     /// </summary>
-    private static string? PlayGoInitialChunkProblem(string packagePath, string passcode)
+    internal static string? PlayGoInitialChunkProblem(string packagePath, string passcode)
     {
         byte[]? chunkDat, ficm;
         try
@@ -1955,7 +1960,7 @@ internal static class Program
         }
     }
 
-    private static Dictionary<string, string?> ParseFlags(string[] args)
+    internal static Dictionary<string, string?> ParseFlags(string[] args)
     {
         var flags = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         for (var i = 1; i < args.Length; i++)
@@ -1973,7 +1978,7 @@ internal static class Program
             ? v
             : throw new ArgumentException($"--{key} is required");
 
-    private static int Fail(string message, Exception? ex = null)
+    internal static int Fail(string message, Exception? ex = null)
     {
         Console.Error.WriteLine($"error: {message}");
         if (ex is not null && Environment.GetEnvironmentVariable("FPKG_TRACE") == "1")
