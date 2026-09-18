@@ -45,6 +45,14 @@ public class RepairPlayGoCommandTests
     /// say — proves nothing: those are printed well after Load and Parse return, so a banner moved
     /// to sit between them still precedes it.
     /// </para>
+    /// <para>
+    /// THIS ONLY WORKS BECAUSE the read and the parse are separate stages. While stage 1 spanned
+    /// Load, Parse and ReadContentId together, a banner moved to sit between Load and Parse still
+    /// left Parse — seconds of it — on the clock, so the elapsed figure stayed far above 2 ms and
+    /// this test passed on the very ordering it exists to reject. Split, "reading package" times
+    /// nothing but Load, and that same move drops it to ~0 ms. Verified by experiment: moving the
+    /// <c>Package:</c> line and the stage banner below Load makes this assertion fail.
+    /// </para>
     /// </summary>
     [SkippableFact]
     public void TheDryRunAnnouncesItselfBeforeTheSlowWork()
@@ -55,7 +63,7 @@ public class RepairPlayGoCommandTests
         string firstLine = s.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0];
         Assert.StartsWith("Package:", firstLine);
 
-        int banner = s.IndexOf("[1/4] reading package", StringComparison.Ordinal);
+        int banner = s.IndexOf("[1/5] reading package", StringComparison.Ordinal);
         Assert.True(banner >= 0, "the stage 1 banner was never printed");
 
         var elapsed = Regex.Match(s, @"reading package done in (\d+(?:\.\d+)?)(ms|s)");
@@ -73,10 +81,11 @@ public class RepairPlayGoCommandTests
         Skip.IfNot(TestPackage.Exists, "test package not present");
         string s = CaptureRun(["repair-playgo", TestPackage.Path]);
 
-        Assert.Contains("[1/4] reading package", s);
-        Assert.Contains("[2/4] recovering PlayGo values", s);
-        Assert.Contains("[3/4] generating replacement entries", s);
-        Assert.Contains("[4/4] resealing the CNT", s);
+        Assert.Contains("[1/5] reading package", s);
+        Assert.Contains("[2/5] parsing the entry table", s);
+        Assert.Contains("[3/5] recovering PlayGo values", s);
+        Assert.Contains("[4/5] generating replacement entries", s);
+        Assert.Contains("[5/5] resealing the CNT", s);
     }
 
     [SkippableFact]
@@ -262,8 +271,8 @@ public class RepairPlayGoCommandTests
             Assert.Empty(Directory.GetFiles(dir, "*" + RepairJournal.Suffix));
             Assert.Empty(Directory.GetFiles(dir, "*" + RepairJournal.MarkerSuffix));
 
-            Assert.Contains("[5/8] journalling the original CNT and SI", output);
-            Assert.Contains("[8/8] appending the rebuilt SI", output);
+            Assert.Contains("[6/9] journalling the original CNT and SI", output);
+            Assert.Contains("[9/9] appending the rebuilt SI", output);
             Assert.DoesNotContain("staging pass", output);
             // The journal path is printed on every in-place run, not only under --verbose: it is
             // the user's only record of where the recovery data went, and they need it at the

@@ -400,22 +400,30 @@ internal static class RepairPlayGoCommand
     }
 
     /// <summary>
-    /// Stage counts, one per mode. The four shared stages (reading package, recovering PlayGo
-    /// values, generating replacement entries, resealing the CNT) run in every mode; the write
-    /// stages after them do not run for a dry run, and the two writers do not run the same ones.
-    /// <see cref="Progress"/> prints <c>[n/total]</c>, so the total has to be the one for the mode
-    /// actually being run — a dry run that announced 7 stages and stopped at 4 would read as a
-    /// failure, and an in-place run announcing the staged writer's 7 would print <c>[8/7]</c>.
+    /// Stage counts, one per mode. The five shared stages (reading package, parsing the entry
+    /// table, recovering PlayGo values, generating replacement entries, resealing the CNT) run in
+    /// every mode; the write stages after them do not run for a dry run, and the two writers do not
+    /// run the same ones. <see cref="Progress"/> prints <c>[n/total]</c>, so the total has to be the
+    /// one for the mode actually being run — a dry run that announced 8 stages and stopped at 5
+    /// would read as a failure, and an in-place run announcing the staged writer's 8 would print
+    /// <c>[9/8]</c>.
     ///
     /// <para>
-    /// 4 + 3 for <c>--out</c> (two staging passes around the CRC table) and 4 + 4 for
+    /// 5 + 3 for <c>--out</c> (two staging passes around the CRC table) and 5 + 4 for
     /// <c>--in-place</c>, whose extra stage is the journal <see cref="InPlaceWriter.Write"/> makes
     /// durable before it touches a byte of the package.
     /// </para>
+    /// <para>
+    /// The read and the parse are TWO stages, not one. A single stage spanning both reports an
+    /// elapsed time that attributes to neither, and — the reason it was split — it cannot tell a
+    /// banner printed before the work from one printed between the read and the parse: both leave
+    /// seconds on the clock. Split, "reading package" reports ~0 ms the moment its banner moves
+    /// after <see cref="PackageRegions.Load"/>, which is a difference a test can see.
+    /// </para>
     /// </summary>
-    private const int DryRunStages = 4;
-    private const int WriteStages = 7;
-    private const int InPlaceWriteStages = 8;
+    private const int DryRunStages = 5;
+    private const int WriteStages = 8;
+    private const int InPlaceWriteStages = 9;
 
     /// <summary>
     /// Recovery restores and then STOPS, so it runs exactly one stage and none of the repair's.
@@ -467,6 +475,8 @@ internal static class RepairPlayGoCommand
 
         progress.Stage("reading package");
         var regions = PackageRegions.Load(path, progress);
+
+        progress.Stage("parsing the entry table");
         var table = CntEntryTable.Parse(regions.Cnt, passcode);
         string contentId = CntHeader.ReadContentId(regions.Cnt);
 

@@ -121,10 +121,10 @@ public class AcceptanceTests
             Assert.False(File.Exists(copy + ".repair-playgo.tmp"));
             Assert.False(File.Exists(RepairJournal.PathFor(copy, null)));
 
-            // The in-place path, named: journal first, eight stages, and none of the staged
+            // The in-place path, named: journal first, nine stages, and none of the staged
             // writer's two passes.
-            Assert.Contains("[5/8] journalling the original CNT and SI", output);
-            Assert.Contains("[8/8] appending the rebuilt SI", output);
+            Assert.Contains("[6/9] journalling the original CNT and SI", output);
+            Assert.Contains("[9/9] appending the rebuilt SI", output);
             Assert.DoesNotContain("staging pass", output);
         }
         finally { File.Delete(viaOut); File.Delete(copy); }

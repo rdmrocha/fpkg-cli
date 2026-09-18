@@ -49,6 +49,29 @@ internal sealed record PackageRegions(
         using var input = openSourceStream(packagePath);
         var map = ProsperoPackageArchive.Inspect(input);
 
+        // CROSS-CHECKED, not merely taken from one of the two. CntOffset is the value WriteTo uses
+        // as the verbatim copy length: everything below it is streamed from the source byte for
+        // byte and everything at or above it is replaced by the rebuilt CNT and SI. If the FIH and
+        // the container map disagree about where that boundary is, one of them describes a
+        // different package layout than the one being spliced, and the output would be silently
+        // wrong — truncated or overlapping — with every digest recomputed over the wrong bytes.
+        // On an --in-place run that file replaces the original, so this has to be a refusal, not a
+        // preference for whichever source happens to be consulted.
+        //
+        // UNTESTED, deliberately, and this records why. The FIH stores the value at file offset
+        // 0x58 and Inspect derives its own as OuterPfsOffset + OuterPfsSize, so doctoring 0x58 in a
+        // copy is the obvious fixture — but ProsperoPkgReader.Read above checks for the CNT magic
+        // at the FIH's offset and fails first with "Embedded container has invalid CNT magic"
+        // (measured, not assumed). Reaching this line from a doctored file would mean planting a
+        // second valid CNT header at the doctored offset, which is an invented package rather than
+        // a doctored one. The guard stays because the reader's magic check is not the same check:
+        // it proves something CNT-shaped is there, not that it is the CNT Inspect measured.
+        if (map.CntOffset != (long)pkg.Fih.EmbeddedCntOffset)
+            throw new InvalidDataException(
+                $"the package's FIH says the embedded CNT begins at {(long)pkg.Fih.EmbeddedCntOffset} " +
+                $"but its container map says {map.CntOffset}. The FIH and the container map disagree " +
+                "about where the CNT begins, so this package cannot be repaired safely.");
+
         // The stage's real work is exactly these two ranges, so that — not the file position, which
         // starts at ~99.9% of a large package the moment we seek to the CNT — is what drives the bar.
         long expected = map.CntSize + map.SupplementSize;
@@ -75,7 +98,15 @@ internal sealed record PackageRegions(
         if (size <= 0)
             return [];
 
-        var buffer = new byte[checked((int)size)];
+        // Named, not a bare OverflowException from checked((int)size). The whole region is held in
+        // memory as one array, so a >2 GB CNT cannot be loaded at all — and huge packages are
+        // exactly this command's subject, so the message has to say which region and how large.
+        if (size > int.MaxValue)
+            throw new InvalidDataException(
+                $"the {what} region is {size:N0} bytes, larger than the 2 GiB a single buffer can " +
+                $"hold; this package's {what} is too large to load into memory.");
+
+        var buffer = new byte[(int)size];
         input.Seek(offset, SeekOrigin.Begin);
         int filled = 0;
         while (filled < buffer.Length)
