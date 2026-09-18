@@ -426,10 +426,6 @@ internal static PackageRegions Load(string packagePath)
 }
 ```
 
-If `Split` refuses `Stream.Null` for the outer PFS, fall back to reading the three ranges directly
-with `FileStream` seeks — the offsets above are all the information needed. Keep whichever works and
-delete the other; do not leave both.
-
 `WriteTo`:
 
 ```csharp

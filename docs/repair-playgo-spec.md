@@ -277,8 +277,60 @@ cp -R out/inner src/ && cp -R out/source/sce_sys/. src/sce_sys/
 disappearing are all worth having as fast feedback during development. **None of them is the gate.**
 Only the two byte-compares are.
 
+### Running the gate, and its trap
+
+```sh
+dotnet test fpkg-cli.Tests/fpkg.Tests.csproj --filter Acceptance
+```
+
+Both fixed points, plus the full-verify and warning-cleared checks, live in
+`fpkg-cli.Tests/AcceptanceTests.cs` as three `[SkippableFact]`s. Each one skips when either of two
+**untracked** local artifacts is missing:
+
+- the 661 MB test package, `Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg`, at the repo root;
+- the 0.6.9 oracle rebuild, a single `*.pkg` under `.oracle/pkg/` (gitignored).
+
+**Without both, all three acceptance tests skip — and the suite still reports green.** A CI run that
+only checks the process exit code, or only counts passes, certifies nothing: it passes identically
+whether the gate ran or was silently skipped in its entirety. Anyone wiring this into CI must run the
+filtered command above *and* assert that nothing was skipped — for example, parse the test-run
+summary (or the TRX) for a nonzero skip count and fail the build on it, rather than trusting a `0`
+exit code alone.
+
+If the oracle under `.oracle/pkg/` is missing, rebuild it with the recipe already given above, run
+from the repo root:
+
+```sh
+PKG=Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg
+O=.oracle
+mkdir -p $O
+./fpkg extract "$PKG" $O/out
+./fpkg extract "$PKG" $O/out --rebuild-source
+cp -R $O/out/inner $O/src && cp -R $O/out/source/sce_sys/. $O/src/sce_sys/
+./fpkg build --source $O/src --out $O/pkg
+```
+
+Verify before trusting it — `./fpkg info $O/pkg/*.pkg | grep -E '4097|8209|12288'` should report
+`playgo-chunk.dat` 5376, `playgo-ficm.dat` 62 and `playgo-scenario.json` 2293, and the produced file
+should be exactly 661,005,150 bytes. If any of those disagree, the oracle is not the package this
+spec measured, and the acceptance gate would be comparing against the wrong thing.
+
 ## Open
 
-- Does any package in the wild carry `pfsimage.xml`? Refuse until one is examined.
-- `publisherNwonly` / `includePublisherLabels` are assumed `true` for an Application volume. Confirm against a non-Application package before widening scope.
-- A package with fewer than 31 languages exercises a different `BuildLanguageChunkLayout` branch. Untested.
+- **Does any package in the wild carry `pfsimage.xml`?** Still open. The guard (see "the SI needs two
+  member swaps" above) is implemented and refuses outright rather than attempting to reproduce it;
+  no package examined so far carries one.
+- **Are `publisherNwonly` / `includePublisherLabels` really `true` for an Application volume?**
+  Confirmed for this package: the byte-identical acceptance gate against the 0.6.9 oracle proves both
+  flags are right for *this* package's content type. Still unconfirmed for a non-Application volume —
+  but that is no longer a live hazard, because the shipped content-type guard now refuses any package
+  that is not the PS5 Application profile outright, so the assumption is enforced rather than merely
+  hoped true. Closing this properly — widening the repair beyond Application volumes — needs a
+  confirmed non-Application oracle, not just removing the guard.
+- **A package with fewer than 31 languages exercises a different `BuildLanguageChunkLayout` branch.**
+  Still untested, and now unreachable through the shipped guards: such a package's
+  `playgo-scenario.json` would not reproduce byte-for-byte under the additive-only comparison (the
+  scenario-presentation guard above), so it is refused before the repair ever reaches
+  `BuildLanguageChunkLayout`. Closing it needs a package built with fewer than 31 languages whose
+  stored `playgo-scenario.json` already passes that guard — i.e. one whose scenario JSON was already
+  generic — to exercise the narrower-mask branch under test.

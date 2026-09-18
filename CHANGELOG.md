@@ -23,6 +23,15 @@ Chunk zero now holds the game files, each selected language gets a small chunk o
 
 Upstream also dropped the scenario limit from 64 to **5**, matching the SDK's own `SCE_PLAYGO_MAX_SCENARIO`.
 
+### New: `fpkg repair-playgo`
+`fpkg repair-playgo <pkg>` rewrites a package's PlayGo metadata in place to the shape LibProsperoPkg 0.6.9 produces, in seconds, without recompressing or copying the payload. Packages built with 0.6.8 declared only chunk zero initial while spreading files across every chunk, which a console reads as "almost nothing is downloaded". The command regenerates `playgo-chunk.dat`, `playgo-ficm.dat` and `playgo-scenario.json`, relays out the CNT body into its existing slack, reseals the digest chain and rebuilds the SI segment. Output is byte-identical to a 0.6.9 rebuild of the same source.
+
+`--dry-run` is the default; `--out <path>` or `--in-place` is required to write. `--out` refuses to overwrite an existing file rather than replacing it. `--in-place` writes to a temp file beside the target and renames over it only after a successful, flushed write, so the original is never truncated first.
+
+It refuses rather than degrading on six guards: a passcode that does not match the package; `pfsimage.xml` present in the SI; a relayout that would change `body_size`; a `playgo-scenario.json` declaring a member regeneration would not reproduce; a package that is not the PS5 publisher profile; and a package that is not an Application volume.
+
+Requires LibProsperoPkg 0.6.7 or newer; refuses with a version message on anything older.
+
 ### Removed
 The zero-length-chunk guard. It existed because chunk extents used to be an even division of the image, so a chunk count the image could not fill produced empty extents. Extents are no longer computed that way and empty chunks are now intentional, so the guard would reject ordinary builds.
 
