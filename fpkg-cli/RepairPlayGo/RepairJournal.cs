@@ -66,7 +66,7 @@ internal sealed record RepairJournal(
 
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(target)));
         return Path.Combine(tempDir,
-                            $"{Path.GetFileName(target)}.{Convert.ToHexString(digest)[..8].ToLowerInvariant()}{Suffix}");
+                            $"{Path.GetFileName(target)}.{Convert.ToHexString(digest)[..16].ToLowerInvariant()}{Suffix}");
     }
 
     /// <summary>
@@ -91,7 +91,10 @@ internal sealed record RepairJournal(
     /// full path, not the file name: <see cref="PathFor"/> names journals after the package, so
     /// two packages both called <c>game.pkg</c> in different directories would otherwise
     /// contribute the same identity. The cost is that a package renamed after a crash has an
-    /// inapplicable journal; that is the safe direction to fail.
+    /// inapplicable journal; that is the safe direction to fail. Note too that
+    /// <see cref="Path.GetFullPath(string)"/> normalises but does not resolve symlinks, so
+    /// <c>/tmp/x.pkg</c> and <c>/private/tmp/x.pkg</c> refuse each other even though they are one
+    /// file — the safe direction again, but not something a reader should have to discover.
     /// </para>
     /// </summary>
     internal static byte[] ComputeIdentity(string packagePath)
@@ -117,6 +120,20 @@ internal sealed record RepairJournal(
     /// Writes the journal and flushes it to the device. Returns only once the journal is durable —
     /// the whole design rests on the journal outliving a power loss that happens one instruction
     /// into the repair, so the caller may open the package for writing the moment this returns.
+    ///
+    /// <para>
+    /// Caller ordering constraint: this opens <paramref name="journalPath"/> with
+    /// <see cref="FileMode.Create"/> and so truncates any journal already there. A run that finds
+    /// an existing journal must therefore offer recovery from it BEFORE calling this, or a re-run
+    /// after an interruption destroys the very data that would have undone it.
+    /// </para>
+    ///
+    /// <para>
+    /// "Durable" here means <c>fsync</c>, which is what <c>Flush(flushToDisk: true)</c> maps to on
+    /// macOS — not <c>F_FULLFSYNC</c>, and the containing directory is never synced. So a returned
+    /// <c>Write</c> means the journal survives a process or kernel crash, not that it is certain to
+    /// survive a power cut. Closing that last gap belongs to a layer below this one.
+    /// </para>
     /// </summary>
     internal static void Write(string journalPath, string packagePath, PackageRegions regions,
                                Progress progress)
