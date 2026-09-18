@@ -27,6 +27,9 @@ internal sealed record PackageRegions(
     internal static PackageRegions Load(string packagePath)
     {
         var pkg = ProsperoPkgReader.Read(packagePath);
+        if (pkg.Fih is null)
+            throw new InvalidDataException(
+                "the file has no FIH header, so it carries no embedded CNT region; repair-playgo needs a finalized package");
         long cntOffset = (long)pkg.Fih.EmbeddedCntOffset;
 
         using var input = File.OpenRead(packagePath);
@@ -53,13 +56,13 @@ internal sealed record PackageRegions(
         using var src = File.OpenRead(SourcePath);
         using var dst = File.Create(outputPath);
         // Header, FIH and the whole outer PFS, byte for byte. Never decoded, never rewritten.
-        var head = new byte[81920];
+        var buffer = new byte[81920];
         long remaining = CntOffset;
         while (remaining > 0)
         {
-            int n = src.Read(head, 0, (int)Math.Min(head.Length, remaining));
+            int n = src.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
             if (n <= 0) throw new EndOfStreamException("package truncated before the CNT region");
-            dst.Write(head, 0, n);
+            dst.Write(buffer, 0, n);
             remaining -= n;
         }
         dst.Write(cnt);
