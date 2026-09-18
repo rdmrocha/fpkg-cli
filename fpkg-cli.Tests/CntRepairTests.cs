@@ -25,28 +25,56 @@ public class CntRepairTests
 
     /// <summary>
     /// No package on disk can make the gate refuse — every one of them shrinks by a comfortable,
-    /// in-step amount — so the refusal has to be synthesised. This shrinks the declared body_size
-    /// until the EXISTING layout already overruns it by 2048 bytes, more than the 1048 the repair
-    /// gives back, so the relayout cannot land back on the declared size. It is a pre-existing
-    /// overrun, not growth: it exists to prove the gate is wired into Repair AHEAD of Seal, which
-    /// the pure PredictBodySize tests below cannot show.
+    /// in-step amount — so the refusal has to be synthesised. This declares a body_size one whole
+    /// 64-KiB rounding step LARGER than the layout needs (and grows the region to match, so the
+    /// no-padding precondition still holds), which is the over-shrink direction: the relayout lands
+    /// a step below the declared size and cannot get back to it. It exists to prove the gate is
+    /// wired into Repair AHEAD of Seal, which the pure PredictBodySize tests below cannot show.
     /// </summary>
     [SkippableFact]
     public void RefusesWhenTheRelayoutWouldChangeBodySize()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
-        var t = CntEntryTable.Parse(cnt, Passcode);
-        var last = t.Physical[^1];
-        ulong lastEnd = (ulong)last.DataOffset + last.DataSize;
-        CntHeader.SetU64(cnt, CntHeader.BodySize,
-            lastEnd - 2048 - CntHeader.U64(cnt, CntHeader.BodyOffset));
+        ulong bodyOffset = CntHeader.U64(cnt, CntHeader.BodyOffset);
+        ulong bodySize = CntHeader.U64(cnt, CntHeader.BodySize) + 0x10000;
+        Array.Resize(ref cnt, checked((int)(bodyOffset + bodySize)));
+        CntHeader.SetU64(cnt, CntHeader.BodySize, bodySize);
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => CntRepair.Repair(cnt, TestPackage.ContentId, Passcode));
         // "slack" appears only in OUR message; CntReseal.Seal's body_size exception does not
         // contain it. Asserting on it is what makes a mis-ordered check fail instead of pass.
         Assert.Contains("slack", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The real package satisfies Repair's no-padding precondition: its CNT region ends exactly
+    /// where its body ends. Task 2 asserts the same equality from the region side; this states the
+    /// dependency at the point that relies on it, because CntReseal.Seal reconstructs the region
+    /// from the body alone and would silently drop any padding.
+    /// </summary>
+    [SkippableFact]
+    public void TheRealPackagesCntRegionEndsWhereItsBodyDoes()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
+
+        Assert.Equal(
+            (ulong)cnt.Length,
+            CntHeader.U64(cnt, CntHeader.BodyOffset) + CntHeader.U64(cnt, CntHeader.BodySize));
+    }
+
+    [SkippableFact]
+    public void RefusesACntRegionWithPaddingPastItsBody()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
+        Array.Resize(ref cnt, cnt.Length + 4096);   // 4 KiB of trailing padding the reseal cannot carry
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => CntRepair.Repair(cnt, TestPackage.ContentId, Passcode));
+        Assert.Contains("past the end of the body", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [SkippableFact]

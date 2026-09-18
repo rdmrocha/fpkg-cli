@@ -45,6 +45,30 @@ internal static class CntRepair
 
     internal static CntRepairResult Repair(byte[] cnt, string contentId, string passcode)
     {
+        ulong bodyOffset = CntHeader.U64(cnt, CntHeader.BodyOffset);
+        ulong bodySize   = CntHeader.U64(cnt, CntHeader.BodySize);
+
+        // PRECONDITION, checked first: the CNT region ends exactly where its body ends.
+        // CntReseal.Seal returns `new byte[bodyOffset + bodySize]` — it reconstructs the region
+        // from the body alone and structurally cannot represent trailing padding, so padding would
+        // be dropped silently and the region would come back shorter than it went in. The SI's CRC
+        // length rule also assumes region-end and body-end coincide.
+        //
+        // Safe to REQUIRE rather than handle: the 0.6.9 builder's LayOutEntries sets
+        // cnt_region_size = pfs_image_offset, and pfs_image_offset = body_offset + body_size, so
+        // any package these tools produced satisfies this by construction. That is the rationale —
+        // do not "relax" this check without first giving Seal a way to carry padding through, which
+        // is a real feature with no test material behind it. Refusing is the right answer for a
+        // rewrite this hard to undo.
+        if ((ulong)cnt.Length != bodyOffset + bodySize)
+            throw new InvalidOperationException(
+                $"The CNT region is {cnt.Length} bytes but its body ends at " +
+                $"{bodyOffset + bodySize} (body_offset 0x{bodyOffset:X} + body_size 0x{bodySize:X}), " +
+                $"so it carries {(long)cnt.Length - (long)(bodyOffset + bodySize)} bytes past the " +
+                "end of the body. repair-playgo cannot preserve that padding: the reseal " +
+                "reconstructs the region from the body alone, and the SI's CRC length rule assumes " +
+                "the region end and the body end coincide.");
+
         // CntEntryTable.Parse derives the content id from the header to DECRYPT with, while the
         // caller's value is what Seal RE-ENCRYPTS with. A mismatch would silently produce a
         // container decrypted under one key and sealed under another. The parameter is kept rather
@@ -61,9 +85,6 @@ internal static class CntRepair
                 nameof(contentId));
 
         var table = CntEntryTable.Parse(cnt, passcode);
-
-        ulong bodyOffset = CntHeader.U64(cnt, CntHeader.BodyOffset);
-        ulong bodySize   = CntHeader.U64(cnt, CntHeader.BodySize);
 
         // Slack is measured on the ORIGINAL layout, from the last entry in PHYSICAL order — which
         // is not the last entry by id. The entry's own size is used UNALIGNED, deliberately: its
