@@ -58,6 +58,8 @@ internal sealed record PlayGoRecovery(
         for (int i = 0; i < extentCount; i++)
         {
             int at = extentsAt + i * ExtentRecordSize;
+            // The record's first 8 bytes are a per-extent offset; PlayGoRecovery carries no
+            // per-extent offsets, so it is deliberately left unread here.
             ulong length = BinaryPrimitives.ReadUInt64LittleEndian(d[(at + 8)..]) & ExtentValueMask;
             total += length;
             tail = length; // the last extent's length wins — not the max, not the first
