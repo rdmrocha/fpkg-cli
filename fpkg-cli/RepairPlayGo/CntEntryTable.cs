@@ -42,6 +42,7 @@ internal sealed class CntEntry
 /// Parses the CNT's meta table (at <c>entry_table_offset</c>, <c>entry_count</c> 32-byte
 /// big-endian records) and every entry's payload, in both the on-disk id-sorted order and the
 /// physical (ascending-DataOffset) order that <c>LayOutEntries</c> actually placed them in.
+/// <see cref="Parse"/> throws if the file's own read order is not already ascending by id.
 /// </summary>
 internal sealed class CntEntryTable
 {
@@ -52,14 +53,22 @@ internal sealed class CntEntryTable
     /// <summary>Entries in PHYSICAL (pkg.Entries) order — ascending DataOffset.</summary>
     internal IReadOnlyList<CntEntry> Physical { get; }
 
-    /// <summary>The same entries sorted ascending by id — the order of the on-disk meta table.</summary>
+    /// <summary>
+    /// The same entries sorted ascending by id — the order of the on-disk meta table. The sort
+    /// here is explicit (matching what the library itself does before writing the table), and
+    /// <see cref="Parse"/> separately verifies the file's own read order already matched it,
+    /// because the digest table's slots are positional against that on-disk order.
+    /// </summary>
     internal IReadOnlyList<CntEntry> ById { get; }
 
-    private CntEntryTable(List<CntEntry> byId)
+    private CntEntryTable(List<CntEntry> records)
     {
-        ById = byId;
-        Physical = byId.OrderBy(e => e.DataOffset).ToList();
-        _byId = byId.ToDictionary(e => e.Id);
+        // Same CntEntry instances in both views — only the container order differs. A later task
+        // mutates an entry through one view and reseals from the other, so these must never
+        // clone.
+        ById = records.OrderBy(e => e.Id).ToList();
+        Physical = records.OrderBy(e => e.DataOffset).ToList();
+        _byId = records.ToDictionary(e => e.Id);
     }
 
     internal CntEntry this[uint id] => _byId[id];
@@ -72,8 +81,6 @@ internal sealed class CntEntryTable
         // encryption keys, and it lives inside the bytes we are parsing.
         string contentId = Encoding.ASCII.GetString(cnt, CntHeader.ContentId, 36).TrimEnd('\0');
 
-        // The table on disk is already sorted ascending by id, so reading it sequentially
-        // produces exactly the ById order — no separate sort needed for that one.
         var records = new List<CntEntry>((int)entryCount);
         for (int i = 0; i < entryCount; i++)
         {
@@ -87,6 +94,20 @@ internal sealed class CntEntryTable
                 DataOffset = CntHeader.U32(cnt, off + 16),
                 DataSize = CntHeader.U32(cnt, off + 20),
             });
+        }
+
+        // The digest table's slots are positional against this raw on-disk read order, so that
+        // order must already be ascending by id. Fail loudly rather than silently reordering or
+        // silently trusting it — either would misalign digest slots against entries later.
+        for (int i = 1; i < records.Count; i++)
+        {
+            if (records[i].Id < records[i - 1].Id)
+            {
+                throw new InvalidDataException(
+                    $"the CNT meta table is not sorted ascending by id at index {i} " +
+                    $"(id {records[i - 1].Id} at index {i - 1}, id {records[i].Id} at index {i}); " +
+                    "this repair maps digest slots to entries positionally against the on-disk order.");
+            }
         }
 
         // Names come from the ENTRY_NAMES entry: a NUL-separated blob indexed by NameTableOffset.

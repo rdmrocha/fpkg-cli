@@ -38,6 +38,26 @@ public class CntEntryTableTests
     }
 
     [SkippableFact]
+    public void ThrowsWhenTheMetaTableIsNotSortedAscendingById()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var cnt = (byte[])PackageRegions.Load(TestPackage.Path).Cnt.Clone();
+        int table = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
+
+        // Swap the id fields (first 4 bytes) of the first two 32-byte meta records. The table is
+        // ascending by id, so this makes record 0's id greater than record 1's — breaking the
+        // invariant Parse relies on for positional digest-slot mapping.
+        Span<byte> firstId = cnt.AsSpan(table, 4);
+        Span<byte> secondId = cnt.AsSpan(table + 32, 4);
+        Span<byte> tmp = stackalloc byte[4];
+        firstId.CopyTo(tmp);
+        secondId.CopyTo(firstId);
+        tmp.CopyTo(secondId);
+
+        Assert.Throws<InvalidDataException>(() => CntEntryTable.Parse(cnt, new string('0', 32)));
+    }
+
+    [SkippableFact]
     public void MetaRecordsRoundTripThroughTheLibrarysCodec()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
