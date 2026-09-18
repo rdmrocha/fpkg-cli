@@ -35,11 +35,15 @@ public class RepairPlayGoCommandTests
     /// defect fully present. First-line is the user's actual complaint.
     /// </para>
     /// <para>
-    /// <b>At least one <c>reading package N%</c> line exists.</b> Progress.Report is a no-op while
-    /// no stage is open, and those percentages come from inside PackageRegions.Load, so a single
-    /// one of them proves the stage was announced BEFORE the read rather than after it. Anchoring
-    /// on a later line instead — an SI member, say — does not: those are printed well after Load
-    /// and Parse return, so a banner moved to sit between them still precedes it.
+    /// <b>The stage-1 elapsed time covers the read.</b> The stage clock starts at its banner, so if
+    /// the banner is printed AFTER Load has already returned the stage reports ~0 ms; it can only
+    /// report the cost of reading the CNT and SI if it was opened before them. Reading ~64 MB does
+    /// not happen in under 2 ms on any machine, and an already-finished load cannot take that long.
+    /// This assertion replaces an older one on a <c>reading package N%</c> line: since Load stopped
+    /// reading the whole payload the stage finishes in tens of milliseconds, and a stage that quick
+    /// deliberately prints no percentage at all. Anchoring on a later line instead — an SI member,
+    /// say — proves nothing: those are printed well after Load and Parse return, so a banner moved
+    /// to sit between them still precedes it.
     /// </para>
     /// </summary>
     [SkippableFact]
@@ -54,11 +58,13 @@ public class RepairPlayGoCommandTests
         int banner = s.IndexOf("[1/4] reading package", StringComparison.Ordinal);
         Assert.True(banner >= 0, "the stage 1 banner was never printed");
 
-        var percent = Regex.Match(s, @"reading package\s+\d+%");
-        Assert.True(percent.Success,
-                    "no 'reading package N%' line: stage 1 was not open while the package was " +
-                    "being read, so it was announced after the slow work rather than before it");
-        Assert.True(banner < percent.Index, "the banner must precede its own percentages");
+        var elapsed = Regex.Match(s, @"reading package done in (\d+(?:\.\d+)?)(ms|s)");
+        Assert.True(elapsed.Success, "stage 1 never closed with an elapsed time");
+        Assert.True(banner < elapsed.Index, "the banner must precede its own elapsed time");
+        double ms = double.Parse(elapsed.Groups[1].Value) * (elapsed.Groups[2].Value == "s" ? 1000 : 1);
+        Assert.True(ms >= 2,
+                    $"stage 1 took {ms}ms, too little to have covered reading the package: it was " +
+                    "announced after the slow work rather than before it");
     }
 
     [SkippableFact]

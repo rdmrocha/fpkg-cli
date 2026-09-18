@@ -11,7 +11,8 @@ namespace Fpkg.Cli.RepairPlayGo;
 /// <see cref="Report"/> is designed to be called very often — per 80 KiB block in some later
 /// stages (resealing a CNT, a CRC pass over the payload, writing a journal) — so it must be
 /// cheap and heavily throttled: at most every 250 ms or every 5 percentage points, whichever is
-/// sooner, and never for 0% or a repeated percentage.
+/// sooner, and never for 0% or a repeated percentage. A stage that finishes inside
+/// <c>quietBelow</c> shows no percentage at all; one that showed any ends at exactly 100%.
 /// </para>
 /// </summary>
 internal sealed class Progress
@@ -20,6 +21,7 @@ internal sealed class Progress
     private readonly bool _verbose;
     private readonly bool _isTty;
     private readonly int _totalStages;
+    private readonly long _quietBelowMs;
 
     private readonly Stopwatch _stageClock = new();
     private int _stageIndex;
@@ -29,12 +31,19 @@ internal sealed class Progress
     private long _lastEmitTicks;
     private int _lastPercent;
 
-    internal Progress(TextWriter output, bool verbose, bool isTty, int totalStages)
+    /// <param name="quietBelow">
+    /// A stage that finishes faster than this never shows a percentage at all — flashing one number
+    /// and vanishing is noise, not progress. The stage line and its elapsed time are still printed.
+    /// Tests pass <see cref="TimeSpan.Zero"/> to exercise the throttle itself without sleeping.
+    /// </param>
+    internal Progress(TextWriter output, bool verbose, bool isTty, int totalStages,
+                      TimeSpan? quietBelow = null)
     {
         _output = output;
         _verbose = verbose;
         _isTty = isTty;
         _totalStages = totalStages;
+        _quietBelowMs = (long)(quietBelow ?? TimeSpan.FromMilliseconds(200)).TotalMilliseconds;
     }
 
     /// <summary>Starts a stage. Closes the previous one with its elapsed time.</summary>
@@ -67,13 +76,27 @@ internal sealed class Progress
             return;
 
         long nowTicks = _stageClock.ElapsedTicks;
-        long elapsedSinceEmitMs = (nowTicks - _lastEmitTicks) * 1000 / Stopwatch.Frequency;
-        bool timeElapsed = _lastEmitTicks < 0 || elapsedSinceEmitMs >= 250;
-        bool percentJumped = pct - _lastPercent >= 5;
-        if (!timeElapsed && !percentJumped)
-            return;
+        if (_lastEmitTicks < 0)
+        {
+            // Nothing emitted yet this stage. Hold everything back until the stage has been running
+            // long enough to be worth a percentage at all; if it finishes first, it stays quiet.
+            if (nowTicks * 1000 / Stopwatch.Frequency < _quietBelowMs)
+                return;
+        }
+        else
+        {
+            long elapsedSinceEmitMs = (nowTicks - _lastEmitTicks) * 1000 / Stopwatch.Frequency;
+            bool percentJumped = pct - _lastPercent >= 5;
+            if (elapsedSinceEmitMs < 250 && !percentJumped)
+                return;
+        }
 
-        _lastEmitTicks = nowTicks;
+        Emit(pct, nowTicks);
+    }
+
+    private void Emit(int pct, long atTicks)
+    {
+        _lastEmitTicks = atTicks;
         _lastPercent = pct;
 
         if (_isTty)
@@ -109,6 +132,14 @@ internal sealed class Progress
         if (_stageName is null)
             return;
 
+        // A stage that reported progress ends AT 100%, always. The throttle exists to suppress the
+        // stream of intermediate values, and the last step is usually a small one, so left to the
+        // throttle every stage would stop at 98 or 99% and linger there. This one emission bypasses
+        // it. A stage that stayed quiet — no progress at all, or one that finished inside
+        // quietBelow — stays quiet: it gets its elapsed time and nothing else.
+        if (_lastEmitTicks >= 0 && _lastPercent < 100)
+            Emit(100, _stageClock.ElapsedTicks);
+
         ClearOpenLine();
         _stageClock.Stop();
         _output.WriteLine($"  {_stageName} done in {FormatElapsed(_stageClock.Elapsed)}");
@@ -137,9 +168,15 @@ internal sealed class Progress
 
 /// <summary>
 /// A pass-through read wrapper that reports the underlying stream's position as a percentage of
-/// its length — the only progress signal available for a library call that reads a stream and
-/// offers no callback of its own (<c>ProsperoPackageArchive.Split</c>,
-/// <c>ProsperoPlayGo.BuildChunkCrc</c>).
+/// its length — the only progress signal available for a library call that reads a whole stream
+/// front to back and offers no callback of its own (<c>ProsperoPlayGo.BuildChunkCrc</c>).
+///
+/// <para>
+/// Only for a call that really does consume the stream end to end. A call that SEEKS to a range
+/// near the end of a large file reports ~99% before it has read a useful byte, and the monotonic
+/// clamp in <see cref="Progress.Report"/> then pins it there — such a caller must count the bytes
+/// it actually reads instead (see <c>PackageRegions.Load</c>).
+/// </para>
 ///
 /// <para>
 /// PURELY OBSERVATIONAL. Every member delegates to the inner stream, nothing is buffered,
