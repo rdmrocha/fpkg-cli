@@ -57,7 +57,8 @@ internal static class RepairPlayGoCommand
 
     /// <summary>Compared OrdinalIgnoreCase, matching how <c>Program.ParseFlags</c> keys them.</summary>
     private static readonly HashSet<string> KnownFlags =
-        new(["passcode", "out", "in-place", "dry-run", "work-dir", "verbose"],
+        new(["passcode", "out", "in-place", "dry-run", "work-dir", "verbose",
+             "keep-backup", "restore"],
             StringComparer.OrdinalIgnoreCase);
 
     internal static int Run(string[] args)
@@ -76,6 +77,9 @@ internal static class RepairPlayGoCommand
         bool dryRunRequested = flags.ContainsKey("dry-run");
         string? workDir = flags.GetValueOrDefault("work-dir");
         bool verbose = flags.ContainsKey("verbose");
+        bool keepBackup = flags.ContainsKey("keep-backup");
+        bool restore = flags.ContainsKey("restore");
+        string? backupPath = flags.GetValueOrDefault("restore");
 
         // ParseFlags keys OrdinalIgnoreCase, so this must too: an ordinal comparison here would
         // reject --IN-PLACE as unknown after ParseFlags had happily accepted it.
@@ -93,6 +97,13 @@ internal static class RepairPlayGoCommand
             return Program.Fail("--dry-run cannot be combined with --out or --in-place");
         if (flags.ContainsKey("work-dir") && string.IsNullOrWhiteSpace(workDir))
             return Program.Fail("--work-dir needs a path");
+        // A backup is the journal an in-place run already writes, kept instead of deleted. There
+        // is no journal on an --out or dry run, so accepting the flag there would promise an undo
+        // that was never written.
+        if (keepBackup && !inPlace)
+            return Program.Fail("--keep-backup only applies to --in-place; an --out run leaves the original untouched");
+        if (restore && (inPlace || outPath is not null || dryRunRequested || keepBackup))
+            return Program.Fail("--restore cannot be combined with --out, --in-place, --dry-run or --keep-backup");
         if (workDir is not null)
         {
             workDir = Path.GetFullPath(workDir);
@@ -104,6 +115,29 @@ internal static class RepairPlayGoCommand
         }
         if (!File.Exists(path))
             return Program.Fail($"no such file: {path}");
+
+        // Restore is its own command, not a mode of the repair: it plans nothing, reads no CNT and
+        // writes back the two regions the backup captured. It runs before RecoverIfNeeded on
+        // purpose — a package with a retained backup is a COMPLETED repair, not an interrupted one,
+        // and recovery has no business forming an opinion about it.
+        if (restore)
+        {
+            string from = backupPath is null
+                ? RepairJournal.BackupPathFor(path)
+                : Path.GetFullPath(backupPath);
+            if (!File.Exists(from))
+                return Program.Fail(
+                    $"no repair backup at '{from}'. A backup is written only by " +
+                    "`--in-place --keep-backup`; pass --restore <path> if it is somewhere else.");
+            var restoreProgress = new Progress(Console.Out, verbose, false, 1);
+            try { RepairJournal.Restore(from, path, restoreProgress); }
+            catch (InvalidDataException ex) { return Program.Fail(ex.Message); }
+            restoreProgress.Finish();
+            Console.WriteLine();
+            Console.WriteLine($"restored: {path}");
+            Console.WriteLine($"backup:   {from} (kept — delete it when you no longer need the undo)");
+            return 0;
+        }
         // Everything else in this command refuses rather than degrades; silently replacing an
         // existing output would be the one exception.
         if (outPath is not null && File.Exists(outPath))
@@ -133,7 +167,7 @@ internal static class RepairPlayGoCommand
         try
         {
             return Repair(path, passcode, write ? (inPlace ? path : outPath!) : null, inPlace,
-                          workDir, verbose);
+                          workDir, verbose, keepBackup);
         }
         // KeyNotFoundException and UnauthorizedAccessException are BACKSTOPS, not the design: the
         // lookups that could raise the first now route through CntEntryTable.Get and
@@ -433,7 +467,8 @@ internal static class RepairPlayGoCommand
     private const int RecoveryStages = 1;
 
     private static int Repair(string path, string passcode, string? target, bool inPlace,
-                              string? workDir = null, bool verbose = false)
+                              string? workDir = null, bool verbose = false,
+                              bool keepBackup = false)
     {
         // BEFORE every guard, deliberately. The guards ask whether this package is a suitable
         // subject for the repair; this asks whether the file on disk is intact at all, and a
@@ -607,7 +642,8 @@ internal static class RepairPlayGoCommand
         // both. --in-place rewrites the package itself under a journal, needing no free space
         // beside it and leaving no temporary file; --out stages into a temporary and renames.
         if (inPlace)
-            InPlaceWriter.Write(regions, repaired, contentId, target, journalPath!, progress);
+            InPlaceWriter.Write(regions, repaired, contentId, target, journalPath!, progress,
+                                backupPath: keepBackup ? RepairJournal.BackupPathFor(target) : null);
         else
             WriteRepaired(regions, repaired, contentId, target, workDir: workDir,
                           progress: progress);

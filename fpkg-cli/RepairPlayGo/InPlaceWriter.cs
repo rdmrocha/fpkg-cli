@@ -46,7 +46,8 @@ internal static class InPlaceWriter
     /// </param>
     internal static void Write(PackageRegions regions, CntRepairResult repaired,
                                string contentId, string target, string journalPath,
-                               Progress progress, Action? faultAfterCntWrite = null)
+                               Progress progress, Action? faultAfterCntWrite = null,
+                               string? backupPath = null)
     {
         // RepairJournal.Write opens with FileMode.CreateNew and refuses this on its own, so an
         // existing journal can never be truncated even if this check were dropped. It is kept
@@ -147,8 +148,31 @@ internal static class InPlaceWriter
         //    points at it stop being needed. The journal goes first: a marker naming a journal that
         //    is already gone is the one combination recovery must refuse loudly, and it would be
         //    plain wrong here.
-        File.Delete(journalPath);
+        if (backupPath is null)
+        {
+            File.Delete(journalPath);
+            File.Delete(markerPath);
+            return;
+        }
+
+        // KEEPING THE BACKUP INVERTS THAT ORDER, deliberately. The journal is not deleted but
+        // renamed, which costs nothing — its ~316 MB of CNT and SI are already written and fsynced,
+        // and the rename takes it out of the journal namespace so RecoverIfNeeded never considers
+        // it again. But a rename is not atomic with respect to the marker, so one of the two windows
+        // has to be chosen:
+        //
+        //   rename first  -> a crash leaves a marker naming a journal that no longer exists, which
+        //                    the next run refuses loudly. The package is FINE and fully repaired,
+        //                    and the user is blocked on it. Wrong direction.
+        //   marker first  -> a crash leaves a journal at the default path with no marker. The next
+        //                    run finds it by the fallback path, sees the length differs from
+        //                    TargetLength, and correctly concludes the repair completed — then
+        //                    deletes it. The cost is a lost BACKUP, never a lost package.
+        //
+        // Losing the ability to undo is recoverable (rebuild, or repair the other copy); being
+        // locked out of a healthy package is not something the user can reason about. Marker first.
         File.Delete(markerPath);
+        File.Move(journalPath, backupPath, overwrite: true);
     }
 
     /// <summary>

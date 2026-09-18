@@ -110,6 +110,13 @@ internal static class Program
                                         rewrites a 0.6.8-built package's PlayGo metadata to the
                                         0.6.9 shape without touching the payload. Reports and
                                         writes nothing unless --out or --in-place is given.
+                          --keep-backup     (--in-place only) keep the recovery journal as
+                                            <file.pkg>.repair-playgo.backup instead of deleting
+                                            it, so the repair can be undone later. Costs no
+                                            extra I/O and about 0.4% of the package in space.
+                          --restore [path]  put a package back from such a backup and stop.
+                                            Defaults to the backup beside the package. The
+                                            backup is bound to the package's exact path.
                           --work-dir <dir>  where the journal (--in-place) or the staging
                                             file (--out) is written; defaults to beside the
                                             target. A different device makes --out's final
@@ -481,10 +488,10 @@ internal static class Program
             foreach (var issue in result.Issues) Console.WriteLine($"  ISSUE: {issue}");
             // Reported after the library's own findings, and separately, because it is a warning
             // about a structurally valid package rather than one of its issues.
-            var initialChunks = PlayGoInitialChunkProblem(pkg, passcode);
-            if (initialChunks is not null) Console.WriteLine($"  WARNING: {initialChunks}");
+            var warnings = PlayGoWarnings(pkg, passcode);
+            foreach (var warning in warnings) Console.WriteLine($"  WARNING: {warning}");
             Console.WriteLine($"\n{result.Issues.Count} issue(s)" +
-                              (initialChunks is null ? "" : ", 1 warning"));
+                              (warnings.Count == 0 ? "" : $", {warnings.Count} warning(s)"));
             return result.Issues.Count == 0 ? 0 : 1;
         }
 #else
@@ -551,8 +558,8 @@ internal static class Program
         if (smallestInitial == int.MaxValue || smallestInitial >= itsTotal) return null;
 
         // FICM: 16-byte header, then two bytes per file with the chunk id in the first.
-        uint mapOffset = BinaryPrimitives.ReadUInt32LittleEndian(ficm.AsSpan(8));
-        uint mapSize = BinaryPrimitives.ReadUInt32LittleEndian(ficm.AsSpan(12));
+        uint mapOffset = BinaryPrimitives.ReadUInt32LittleEndian(ficm[8..]);
+        uint mapSize = BinaryPrimitives.ReadUInt32LittleEndian(ficm[12..]);
         if (mapOffset != 16 || mapSize == 0 || 16 + (long)mapSize > ficm.Length) return null;
 
         int outside = 0, highest = 0;
@@ -568,6 +575,99 @@ internal static class Program
                $"index {smallestInitial} (highest {highest}), but the scenario declares only " +
                $"{smallestInitial} of its {itsTotal} chunk(s) as initial. A package installed whole " +
                "still reports those files as not downloaded. Rebuild it.";
+    }
+
+    /// <summary>
+    /// Reports chunks that own a slice of the mount image but hold no files.
+    ///
+    /// A PlayGo chunk's extent names the byte range of the image that belongs to it; the FICM
+    /// names which chunk each file lives in. The two have to agree. When a chunk past zero owns
+    /// an extent but the FICM maps nothing into it, those bytes belong to no file — yet they are
+    /// real payload, because the extents tile the image with no gaps. The effect is that a slice
+    /// of the tail is attributed to a chunk the console may treat as optional (each language
+    /// chunk carries only its own language's mask), while the FICM still claims every file is in
+    /// chunk zero.
+    ///
+    /// Publishing Tools does not produce this shape: it places a real generated payload file in
+    /// every language chunk, so a chunk that owns bytes also owns a file. Neither the library's
+    /// verifier nor <see cref="PlayGoInitialChunkProblem"/> catches it — the layout is
+    /// structurally valid and the scenario can declare every chunk initial while it is true.
+    ///
+    /// Returns null when there is nothing to say.
+    /// </summary>
+    /// <summary>
+    /// Every PlayGo warning a package earns, in report order. Kept as a list rather than a single
+    /// nullable so that a package with more than one defect reports all of them: the warning set
+    /// is what identifies which repairs an artifact already carries.
+    /// </summary>
+    internal static IReadOnlyList<string> PlayGoWarnings(string packagePath, string passcode) =>
+        new[]
+        {
+            PlayGoInitialChunkProblem(packagePath, passcode),
+            PlayGoOrphanedExtentProblem(packagePath, passcode),
+        }.OfType<string>().ToArray();
+
+    internal static string? PlayGoOrphanedExtentProblem(string packagePath, string passcode)
+    {
+        byte[]? chunkDat, ficm;
+        try
+        {
+            chunkDat = ProsperoPackageArchive.TryReadCntEntry(packagePath, passcode, 4097u);
+            ficm = ProsperoPackageArchive.TryReadCntEntry(packagePath, passcode, 8209u);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
+        {
+            return null;   // diagnostics only; the library's own checks own the hard failures
+        }
+        if (chunkDat is null || ficm is null) return null;
+        return PlayGoOrphanedExtentProblem(chunkDat, ficm);
+    }
+
+    /// <summary>
+    /// The derivation behind <see cref="PlayGoOrphanedExtentProblem(string,string)"/>, over the two
+    /// entry payloads alone. Separated so the clean case can be exercised against a descriptor
+    /// built by <c>ProsperoPlayGo.BuildMultiChunkDat</c> rather than a whole fixture package.
+    /// </summary>
+    internal static string? PlayGoOrphanedExtentProblem(ReadOnlySpan<byte> chunkDat, ReadOnlySpan<byte> ficm)
+    {
+        if (chunkDat.Length < 256 || ficm.Length < 16) return null;
+
+        // Chunk section: descriptor at 0xC0, 32 bytes per chunk, the chunk's own extent count a
+        // u16 at +4. Chunk zero owns two (its main slice plus the trailing metadata extent).
+        int chunkCount = BinaryPrimitives.ReadUInt16LittleEndian(chunkDat[10..]);
+        int chunksOffset = (int)BinaryPrimitives.ReadUInt32LittleEndian(chunkDat[192..]);
+        if (chunkCount < 2 || chunksOffset <= 0) return null;
+        if (chunksOffset + chunkCount * 32 > chunkDat.Length) return null;
+
+        // FICM: 16-byte header, then two bytes per file with the chunk id in the first.
+        uint mapOffset = BinaryPrimitives.ReadUInt32LittleEndian(ficm[8..]);
+        uint mapSize = BinaryPrimitives.ReadUInt32LittleEndian(ficm[12..]);
+        if (mapOffset != 16 || mapSize == 0 || 16 + (long)mapSize > ficm.Length) return null;
+
+        var populated = new bool[chunkCount];
+        for (int i = 0; i < (int)mapSize; i += 2)
+        {
+            int chunk = ficm[16 + i];
+            if (chunk < chunkCount) populated[chunk] = true;
+        }
+
+        // Chunk zero is exempt: it owns the trailing metadata extent whether or not it also holds
+        // files, so an empty chunk zero is a package with no files at all, not this defect.
+        int orphans = 0, first = -1;
+        for (int k = 1; k < chunkCount; k++)
+        {
+            if (BinaryPrimitives.ReadUInt16LittleEndian(chunkDat[(chunksOffset + k * 32 + 4)..]) == 0)
+                continue;
+            if (populated[k]) continue;
+            orphans++;
+            if (first < 0) first = k;
+        }
+        if (orphans == 0) return null;
+
+        return $"PlayGo: {orphans:N0} chunk(s) starting at index {first} own a slice of the mount " +
+               "image but no files are mapped into them, so that payload is attributed to chunks " +
+               "the console may treat as optional. Publishing Tools puts a generated payload in " +
+               "every such chunk. Repair it.";
     }
 
     /// <summary>

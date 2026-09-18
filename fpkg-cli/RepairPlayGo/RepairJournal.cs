@@ -49,6 +49,18 @@ internal sealed record RepairJournal(
     /// </summary>
     internal const string MarkerSuffix = ".repair-playgo.inprogress";
 
+    /// <summary>
+    /// A RETAINED backup's suffix. Same on-disk format as the journal — it IS the journal, renamed
+    /// rather than deleted once the repair commits — but a different suffix, and that difference is
+    /// load-bearing. <see cref="RepairPlayGoCommand.RecoverIfNeeded"/> treats the PRESENCE of a
+    /// journal as "a repair was interrupted", and settles which side of the write a crash fell on
+    /// by the file's length. A retained journal reads as "the repair completed" and is deleted on
+    /// the very next run; worse, an SI that happened to rebuild to exactly the original length
+    /// would read as "interrupted" and roll a good repair back. Keeping the backup out of the
+    /// journal's namespace is what makes it safe to leave on disk indefinitely.
+    /// </summary>
+    internal const string BackupSuffix = ".repair-playgo.backup";
+
     private static ReadOnlySpan<byte> Magic => "FPKGJRN1"u8;
 
     private const int HeaderLength = 72;
@@ -82,6 +94,21 @@ internal sealed record RepairJournal(
         return Path.Combine(workDir,
                             $"{Path.GetFileName(target)}.{Convert.ToHexString(digest)[..16].ToLowerInvariant()}{Suffix}");
     }
+
+    /// <summary>
+    /// Where a retained backup for <paramref name="target"/> lives: always beside the package, like
+    /// the marker and unlike the journal. A backup outlives the run that made it, so it must not
+    /// depend on that run's <c>--work-dir</c> still being passed — or still existing.
+    ///
+    /// <para>
+    /// The backup is bound to this exact path: <see cref="ComputeIdentity"/> mixes in the target's
+    /// full path, so moving or renaming the package makes its backup inapplicable. That is the safe
+    /// direction to fail, but it does mean a package being bisected has to stay where it is.
+    /// </para>
+    /// </summary>
+    internal static string BackupPathFor(string target) =>
+        Path.Combine(Path.GetDirectoryName(target) ?? ".",
+                     Path.GetFileName(target) + BackupSuffix);
 
     /// <summary>
     /// The in-progress marker for <paramref name="target"/>: <c>&lt;package&gt;.repair-playgo.inprogress</c>,
