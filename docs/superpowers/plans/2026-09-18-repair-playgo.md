@@ -44,6 +44,9 @@
   destroy; a package that is not the PS5 publisher profile (`EntryKeys.Length != 2944`).
 - **`--dry-run` is the default.** Writing requires `--out <path>` or `--in-place`.
 - All CNT header scalars are **big-endian**.
+- `Passcode` in the test code below means `new string('0', 32)` — *this package's* passcode,
+  not a constant of the format. Every API that decrypts or re-encrypts takes it as a required
+  parameter with no default.
 - Test package: `Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg`, 661,006,510 bytes, in the repo
   root. Every test that needs it uses `SkippableFact` so the suite still runs without it.
 - Build the CLI with `dotnet build fpkg-cli/fpkg.csproj`; run tests with
@@ -626,7 +629,16 @@ git commit -m "feat: named big-endian accessors for the CNT header fields"
       internal IReadOnlyList<CntEntry> Physical { get; }
       /// <summary>The same entries sorted ascending by id — the order of the on-disk meta table.</summary>
       internal IReadOnlyList<CntEntry> ById { get; }
-      internal static CntEntryTable Parse(byte[] cnt);
+      /// <summary>
+      /// The passcode is a REQUIRED parameter with no default. A wrong passcode does not
+      /// fail loudly — it silently decrypts the five protected entries to garbage, and a
+      /// later reseal would then re-encrypt that garbage and compute perfectly valid
+      /// digests over it. Defaulting this would reintroduce, one layer lower, exactly the
+      /// failure Task 11's CheckPasscode guard exists to prevent.
+      /// contentId is NOT a parameter: it is read from the CNT header's own ASCII slot,
+      /// which is the value the builder itself used to derive these keys.
+      /// </summary>
+      internal static CntEntryTable Parse(byte[] cnt, string passcode);
       internal CntEntry this[uint id] { get; }
   }
   ```
@@ -648,7 +660,7 @@ public class CntEntryTableTests
     public void ParsesTheKnownEntryTable()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
 
         Assert.Equal(27, t.Physical.Count);
         Assert.Equal([16u, 32u, 128u, 256u, 1u, 512u, 8192u], t.Physical.Take(7).Select(e => e.Id));
@@ -666,7 +678,7 @@ public class CntEntryTableTests
     public void PayloadsRoundTripAgainstTheLibrarysOwnReader()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
         var passcode = new string('0', 32);
         foreach (uint id in new uint[] { 4097, 8208, 8209, 12288, 8192 })
         {
@@ -680,7 +692,7 @@ public class CntEntryTableTests
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
-        var t = CntEntryTable.Parse(cnt);
+        var t = CntEntryTable.Parse(cnt, Passcode);
         int table = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
         foreach (var (e, i) in t.ById.Select((e, i) => (e, i)))
         {
@@ -856,7 +868,7 @@ public class CntResealTests
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var r = PackageRegions.Load(TestPackage.Path);
-        var t = CntEntryTable.Parse(r.Cnt);
+        var t = CntEntryTable.Parse(r.Cnt, Passcode);
         var contentId = ProsperoPkgReader.Read(TestPackage.Path).Header.ContentId;
 
         var resealed = CntReseal.Seal(r.Cnt, t.Physical, contentId, new string('0', 32));
@@ -893,7 +905,7 @@ public class CntResealTests
 
         // playgo-scenario.json (12288) is last in physical order; pad it so everything after it
         // in the body — nothing — moves, then pick a mid-list entry so plenty does.
-        var grown = CntEntryTable.Parse(r.Cnt);
+        var grown = CntEntryTable.Parse(r.Cnt, Passcode);
         var target = grown[4097];                       // physical index 15 of 27
         var original = target.Payload;
         target.Payload = [.. original, .. new byte[1000]];
@@ -902,7 +914,7 @@ public class CntResealTests
         var bigger = CntReseal.Seal(r.Cnt, grown.Physical, contentId, passcode);
         Assert.NotEqual(Convert.ToHexString(r.Cnt), Convert.ToHexString(bigger));
 
-        var shrunk = CntEntryTable.Parse(bigger);
+        var shrunk = CntEntryTable.Parse(bigger, Passcode);
         shrunk[4097].Payload = original;
         shrunk[4097].DataSize = (uint)original.Length;
         var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, passcode);
@@ -1022,7 +1034,7 @@ public class PlayGoRecoveryTests
     public void RecoversTheMeasuredValues()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
         var r = PlayGoRecovery.From(t[4097].Payload);
 
         Assert.Equal(100, r.ChunkCount);
@@ -1042,7 +1054,7 @@ public class PlayGoRecoveryTests
     public void AgreesWithTheLibrarysOwnCountsReader()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
         var r = PlayGoRecovery.From(t[4097].Payload);
         // ProsperoPlayGo.ReadChunkCounts returns the internal nested record Counts; read its two
         // properties reflectively rather than duplicating the parse.
@@ -1176,7 +1188,7 @@ public class OracleTests
     public void TheOracleHasTheTargetEntrySizes()
     {
         Skip.IfNot(Oracle.Available, "oracle not built — see docs/superpowers/plans/2026-09-18-repair-playgo.md Task 7");
-        var t = CntEntryTable.Parse(PackageRegions.Load(Oracle.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(Oracle.Path).Cnt, Passcode);
         Assert.Equal(5376u, t[4097].DataSize);
         Assert.Equal(62u,   t[8209].DataSize);
         Assert.Equal(2293u, t[12288].DataSize);
@@ -1315,8 +1327,8 @@ public class PlayGoEntriesTests
     public void GeneratedEntriesAreByteIdenticalToTheOracles()
     {
         Skip.IfNot(Oracle.Available && TestPackage.Exists, "oracle or test package not built");
-        var orig   = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
-        var oracle = CntEntryTable.Parse(PackageRegions.Load(Oracle.Path).Cnt);
+        var orig   = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
+        var oracle = CntEntryTable.Parse(PackageRegions.Load(Oracle.Path).Cnt, Passcode);
 
         var built = PlayGoEntries.Build(PlayGoRecovery.From(orig[4097].Payload), orig[8209].Payload);
 
@@ -1329,7 +1341,7 @@ public class PlayGoEntriesTests
     public void TheGeneratedSetIsAValidPlayGoLayout()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
         var r = PlayGoRecovery.From(t[4097].Payload);
         var built = PlayGoEntries.Build(r, t[8209].Payload);
 
@@ -1423,7 +1435,7 @@ public class CntRepairTests
         Skip.IfNot(TestPackage.Exists, "test package not present");
         // Synthesise the condition: shrink body_size so the slack is 16 bytes.
         var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
-        var t = CntEntryTable.Parse(cnt);
+        var t = CntEntryTable.Parse(cnt, Passcode);
         var last = t.Physical[^1];
         CntHeader.SetU64(cnt, CntHeader.BodySize,
             (ulong)(last.DataOffset + last.DataSize + 16) - CntHeader.U64(cnt, CntHeader.BodyOffset));
@@ -1736,7 +1748,7 @@ public class RepairPlayGoCommandTests
     public void RefusesAScenarioJsonCarryingCustomPresentation()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
-        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt);
+        var t = CntEntryTable.Parse(PackageRegions.Load(TestPackage.Path).Cnt, Passcode);
         var r = PlayGoRecovery.From(t[4097].Payload);
 
         var generic = Encoding.UTF8.GetString(t[12288].Payload);
