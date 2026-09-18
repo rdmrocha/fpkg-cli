@@ -43,21 +43,34 @@ internal sealed record RepairJournal(
     private const int CopyBuffer = 81920;
 
     /// <summary>
-    /// Where the journal for <paramref name="target"/> lives: beside the package by default, or
-    /// in <paramref name="tempDir"/> when one is given (same base name either way, so a stray
-    /// journal is always traceable back to its package).
+    /// Where the journal for <paramref name="target"/> lives.
+    ///
+    /// <para>
+    /// By default: beside the package, named after it — the directory already pairs the two, and a
+    /// stray journal is immediately recognisable.
+    /// </para>
+    ///
+    /// <para>
+    /// Under <paramref name="tempDir"/>, every package's journal lands in one shared directory, so
+    /// the name alone is not unique: two packages both called <c>game.pkg</c> in different
+    /// directories would collide, and the second repair would silently overwrite the first's
+    /// journal — losing the first's recovery data outright if it were interrupted. The name
+    /// therefore carries a short digest of the target's full path to keep them apart.
+    /// </para>
     /// </summary>
     internal static string PathFor(string target, string? tempDir)
     {
-        string name = Path.GetFileName(target) + Suffix;
-        string dir = string.IsNullOrEmpty(tempDir)
-            ? Path.GetDirectoryName(target) ?? "."
-            : tempDir;
-        return Path.Combine(dir, name);
+        if (string.IsNullOrEmpty(tempDir))
+            return Path.Combine(Path.GetDirectoryName(target) ?? ".",
+                                Path.GetFileName(target) + Suffix);
+
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(target)));
+        return Path.Combine(tempDir,
+                            $"{Path.GetFileName(target)}.{Convert.ToHexString(digest)[..8].ToLowerInvariant()}{Suffix}");
     }
 
     /// <summary>
-    /// SHA-256 of file[0, 65536) — the FIH block — mixed with the package's file name.
+    /// SHA-256 of file[0, 65536) — the FIH block — mixed with the package's full path.
     ///
     /// <para>
     /// The hashed <em>region</em> is deliberately one the repair never modifies. The obvious
@@ -68,14 +81,17 @@ internal sealed record RepairJournal(
     /// </para>
     ///
     /// <para>
-    /// The file name is mixed in because the untouched region alone cannot distinguish a package
-    /// from its own repaired rebuild — they share every byte below the CNT (the acceptance oracle
-    /// and the test package are byte-identical for the first 596 MB). That is not a flaw in the
-    /// region choice; it is inherent: any region an interrupted repair leaves intact is also left
-    /// intact by a completed one. The file name is the one discriminator that survives a partial
-    /// write, and it is exactly right for this job — an in-place repair recovers the same path it
-    /// crashed on. The cost is that renaming a package after a crash makes its journal
-    /// inapplicable; that is the safe direction to fail.
+    /// The path is mixed in because content alone cannot distinguish a package from its own
+    /// repaired form: sharing the payload is the feature's central property — the acceptance
+    /// oracle and the test package are byte-identical for the first 596 MB, and
+    /// <c>OracleTests</c> asserts as much. That is not a flaw in the region choice; it is
+    /// inherent, since any region an interrupted repair leaves intact is also left intact by a
+    /// completed one. The path is the only discriminator that survives a partial write, and it is
+    /// exactly right for this job — an in-place repair recovers the same path it crashed on. The
+    /// full path, not the file name: <see cref="PathFor"/> names journals after the package, so
+    /// two packages both called <c>game.pkg</c> in different directories would otherwise
+    /// contribute the same identity. The cost is that a package renamed after a crash has an
+    /// inapplicable journal; that is the safe direction to fail.
     /// </para>
     /// </summary>
     internal static byte[] ComputeIdentity(string packagePath)
@@ -93,7 +109,7 @@ internal sealed record RepairJournal(
             }
             hash.AppendData(block, 0, filled);
         }
-        hash.AppendData(Encoding.UTF8.GetBytes(Path.GetFileName(packagePath)));
+        hash.AppendData(Encoding.UTF8.GetBytes(Path.GetFullPath(packagePath)));
         return hash.GetHashAndReset();
     }
 
@@ -212,6 +228,8 @@ internal sealed record RepairJournal(
             ?? throw new InvalidDataException(
                 $"'{journalPath}' is not a readable repair journal, so '{target}' cannot be restored from it");
 
+        // Checked before the target is opened for writing, let alone written to: a refusal must
+        // leave the file exactly as it was found.
         var actual = ComputeIdentity(target);
         if (!CryptographicOperations.FixedTimeEquals(actual, journal.Identity))
             throw new InvalidDataException(
