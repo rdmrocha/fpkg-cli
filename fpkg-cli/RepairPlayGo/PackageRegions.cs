@@ -24,7 +24,7 @@ internal sealed record PackageRegions(
     /// far the largest of the three regions and <see cref="WriteTo"/> only ever needs to copy it
     /// byte for byte from the source file, never decode it.
     /// </summary>
-    internal static PackageRegions Load(string packagePath)
+    internal static PackageRegions Load(string packagePath, Progress? progress = null)
     {
         var pkg = ProsperoPkgReader.Read(packagePath);
         if (pkg.Fih is null)
@@ -32,7 +32,13 @@ internal sealed record PackageRegions(
                 "the file has no FIH header, so it carries no embedded CNT region; repair-playgo needs a finalized package");
         long cntOffset = (long)pkg.Fih.EmbeddedCntOffset;
 
-        using var input = File.OpenRead(packagePath);
+        using var file = File.OpenRead(packagePath);
+        // Split walks the WHOLE file — the outer PFS goes to Stream.Null — so the read position is
+        // the only honest progress signal available here, and on a 661 MB package it is the whole
+        // reason this stage is slow. Observation only: ReadingProgress forwards every call.
+        using var input = progress is null
+            ? (Stream)file
+            : new ReadingProgressStream(file, progress);
         using var cnt = new MemoryStream();
         using var si = new MemoryStream();
         ProsperoPackageArchive.Split(input, Stream.Null, cnt, si);
@@ -58,12 +64,14 @@ internal sealed record PackageRegions(
     /// The pass whose output is about to be renamed over the target must keep it.
     /// </para>
     /// </summary>
-    internal void WriteTo(string outputPath, byte[] cnt, byte[] si, bool flushToDisk = true)
+    internal void WriteTo(string outputPath, byte[] cnt, byte[] si, bool flushToDisk = true,
+                          Progress? progress = null)
     {
         using var src = File.OpenRead(SourcePath);
         using var dst = File.Create(outputPath);
         // Header, FIH and the whole outer PFS, byte for byte. Never decoded, never rewritten.
         var buffer = new byte[81920];
+        long total = CntOffset + cnt.Length + si.Length;
         long remaining = CntOffset;
         while (remaining > 0)
         {
@@ -71,9 +79,11 @@ internal sealed record PackageRegions(
             if (n <= 0) throw new EndOfStreamException("package truncated before the CNT region");
             dst.Write(buffer, 0, n);
             remaining -= n;
+            progress?.Report(CntOffset - remaining, total);
         }
         dst.Write(cnt);
         dst.Write(si);
+        progress?.Report(total, total);
         // Flushed to the DEVICE, not just out of the managed buffer. The caller renames this file
         // over the target, and the only data-loss window in that sequence is a power loss straight
         // after the rename leaving a renamed-but-incomplete file. Committing the bytes first

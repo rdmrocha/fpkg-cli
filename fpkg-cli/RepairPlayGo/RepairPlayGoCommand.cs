@@ -47,7 +47,8 @@ internal static class RepairPlayGoCommand
 
     /// <summary>Compared OrdinalIgnoreCase, matching how <c>Program.ParseFlags</c> keys them.</summary>
     private static readonly HashSet<string> KnownFlags =
-        new(["passcode", "out", "in-place", "dry-run"], StringComparer.OrdinalIgnoreCase);
+        new(["passcode", "out", "in-place", "dry-run", "temp-dir", "verbose"],
+            StringComparer.OrdinalIgnoreCase);
 
     internal static int Run(string[] args)
     {
@@ -63,6 +64,8 @@ internal static class RepairPlayGoCommand
         string? outPath = flags.GetValueOrDefault("out");
         bool inPlace = flags.ContainsKey("in-place");
         bool dryRunRequested = flags.ContainsKey("dry-run");
+        string? tempDir = flags.GetValueOrDefault("temp-dir");
+        bool verbose = flags.ContainsKey("verbose");
 
         // ParseFlags keys OrdinalIgnoreCase, so this must too: an ordinal comparison here would
         // reject --IN-PLACE as unknown after ParseFlags had happily accepted it.
@@ -78,6 +81,23 @@ internal static class RepairPlayGoCommand
             return Program.Fail("--out needs a path");
         if (dryRunRequested && (inPlace || outPath is not null))
             return Program.Fail("--dry-run cannot be combined with --out or --in-place");
+        if (flags.ContainsKey("temp-dir") && string.IsNullOrWhiteSpace(tempDir))
+            return Program.Fail("--temp-dir needs a path");
+        if (tempDir is not null)
+        {
+            tempDir = Path.GetFullPath(tempDir);
+            // A path that already exists as a FILE is a typo, not a directory to create:
+            // CreateDirectory would throw an IOException naming neither the flag nor the intent.
+            if (File.Exists(tempDir))
+                return Program.Fail(
+                    $"--temp-dir '{tempDir}' is an existing file, not a directory.");
+            try { Directory.CreateDirectory(tempDir); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or ArgumentException or NotSupportedException)
+            {
+                return Program.Fail($"--temp-dir '{tempDir}' could not be created: {ex.Message}");
+            }
+        }
         if (!File.Exists(path))
             return Program.Fail($"no such file: {path}");
         // Everything else in this command refuses rather than degrades; silently replacing an
@@ -89,9 +109,13 @@ internal static class RepairPlayGoCommand
 
         bool write = inPlace || outPath is not null;
 
+        if (tempDir is not null && outPath is not null)
+            WarnIfTempDirIsOnAnotherDevice(tempDir, Path.GetFullPath(outPath));
+
         try
         {
-            return Repair(path, passcode, write ? (inPlace ? path : outPath!) : null, inPlace);
+            return Repair(path, passcode, write ? (inPlace ? path : outPath!) : null, inPlace,
+                          tempDir, verbose);
         }
         // KeyNotFoundException and UnauthorizedAccessException are BACKSTOPS, not the design: the
         // lookups that could raise the first now route through CntEntryTable.Get and
@@ -103,6 +127,61 @@ internal static class RepairPlayGoCommand
                                       or KeyNotFoundException or UnauthorizedAccessException)
         {
             return Program.Fail(ex.Message, ex);
+        }
+    }
+
+    /// <summary>
+    /// Warns — never refuses — when <c>--temp-dir</c> and <c>--out</c> look like they land on
+    /// different filesystems. The staging file exists so that the target appears atomically, by
+    /// <see cref="File.Move(string,string,bool)"/> being a rename within one filesystem. Across
+    /// devices that call degrades into a copy-then-delete, so a crash can leave a PARTIAL file at
+    /// the target — exactly the window staging was there to close.
+    ///
+    /// <para>
+    /// BEST EFFORT, and it says so. The check walks <see cref="DriveInfo.GetDrives"/> for the
+    /// longest mount point that prefixes each path, which is the closest thing .NET offers to a
+    /// device id. On macOS that is wrong in both directions: APFS volume groups present
+    /// <c>/System/Volumes/Data</c> firmlinked under <c>/</c>, so two paths on ONE device can report
+    /// different mount points, and a synthetic root can hide a real boundary. So an inconclusive
+    /// answer warns rather than staying silent, and the wording never claims certainty.
+    /// </para>
+    /// </summary>
+    private static void WarnIfTempDirIsOnAnotherDevice(string tempDir, string outPath)
+    {
+        string? tempMount = MountPointOf(tempDir);
+        string? outMount = MountPointOf(Path.GetDirectoryName(outPath) ?? ".");
+        if (tempMount is not null && outMount is not null &&
+            string.Equals(tempMount, outMount, StringComparison.Ordinal))
+            return;
+
+        Console.Error.WriteLine(
+            "warning: --temp-dir may be on a different filesystem than --out. If it is, the final " +
+            "File.Move is a non-atomic copy rather than a rename, so an interruption can leave a " +
+            "partial file at the output path. (Best effort: this cannot be determined reliably on " +
+            "this platform.)");
+    }
+
+    /// <summary>The longest mounted volume whose root is a prefix of <paramref name="path"/>.</summary>
+    private static string? MountPointOf(string path)
+    {
+        try
+        {
+            string full = Path.GetFullPath(path);
+            string? best = null;
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                string root = drive.RootDirectory.FullName;
+                if (!full.StartsWith(root, StringComparison.Ordinal))
+                    continue;
+                if (best is null || root.Length > best.Length)
+                    best = root;
+            }
+            return best;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                      or ArgumentException or NotSupportedException)
+        {
+            return null;   // inconclusive: the caller warns
         }
     }
 
@@ -192,18 +271,43 @@ internal static class RepairPlayGoCommand
         return 0;
     }
 
-    private static int Repair(string path, string passcode, string? target, bool inPlace)
+    /// <summary>
+    /// Stage names and counts, in order. The write path stages 5-7 do not run for a dry run, and
+    /// <see cref="Progress"/> prints <c>[n/total]</c>, so the total has to be the one for the mode
+    /// actually being run — a dry run that announced 7 stages and stopped at 4 would read as a
+    /// failure. <c>--in-place</c> still goes through the staged two-pass writer, so it has no
+    /// journal stage of its own yet; that arrives when the in-place writer is routed in.
+    /// </summary>
+    private const int DryRunStages = 4;
+    private const int WriteStages = 7;
+
+    private static int Repair(string path, string passcode, string? target, bool inPlace,
+                              string? tempDir = null, bool verbose = false)
     {
         // BEFORE every guard, deliberately. The guards ask whether this package is a suitable
         // subject for the repair; this asks whether the file on disk is intact at all, and a
         // half-written package has no business being judged on its suitability first.
-        int recovery = RecoverIfNeeded(
-            path, null, new Progress(Console.Out, verbose: false,
-                                     isTty: !Console.IsOutputRedirected, totalStages: 1));
+        var progress = new Progress(Console.Out, verbose,
+                                    isTty: !Console.IsOutputRedirected,
+                                    totalStages: target is null ? DryRunStages : WriteStages);
+
+        int recovery = RecoverIfNeeded(path, tempDir, progress);
         if (recovery >= 0)
             return recovery;
 
-        var regions = PackageRegions.Load(path);
+        // FIRST, and before any of the three slow calls below. PlayGoInitialChunkProblem,
+        // PackageRegions.Load and CntEntryTable.Parse each take seconds on a 661 MB package, and
+        // until this line moved ahead of them the command sat silent through all three.
+        Console.WriteLine($"Package:    {path}");
+
+        int Refuse(string message)
+        {
+            progress.Finish();
+            return Program.Fail(message);
+        }
+
+        progress.Stage("reading package");
+        var regions = PackageRegions.Load(path, progress);
         var table = CntEntryTable.Parse(regions.Cnt, passcode);
         string contentId = CntHeader.ReadContentId(regions.Cnt);
 
@@ -222,7 +326,7 @@ internal static class RepairPlayGoCommand
         var pkg = new Pkg { EntryKeys = KeysEntry.Read(entryKeysMeta, new MemoryStream(regions.Cnt)) };
         pkg.Header.content_id = contentId;
         if (!pkg.CheckPasscode(passcode))
-            return Program.Fail(
+            return Refuse(
                 "the passcode does not match this package. Re-encrypting with it would silently " +
                 "corrupt the five protected entries while every digest still verified — the " +
                 "damage would appear only on a console. Pass the package's real --passcode.");
@@ -231,7 +335,7 @@ internal static class RepairPlayGoCommand
         var problem = Program.PlayGoInitialChunkProblem(path, passcode);
         if (problem is null)
         {
-            Console.WriteLine($"Package: {path}");
+            progress.Finish();
             Console.WriteLine("Nothing to repair: this package's PlayGo map does not place files " +
                               "outside the scenario's initial chunk set.");
             return 0;
@@ -246,7 +350,7 @@ internal static class RepairPlayGoCommand
         uint contentType = CntHeader.U32(regions.Cnt, CntHeader.ContentType);
         uint applicationContentType = ProsperoPkgBuilder.ContentTypeFor(ProsperoVolumeType.Application);
         if (contentType != applicationContentType)
-            return Program.Fail(
+            return Refuse(
                 $"this package's content_type is {contentType} (0x{contentType:X}), not the " +
                 $"Application value {applicationContentType} (0x{applicationContentType:X}). " +
                 "The repair's PlayGo generation flags (publisherNwonly, includePublisherLabels) " +
@@ -256,7 +360,7 @@ internal static class RepairPlayGoCommand
         // ---- Guard 5: the publisher ENTRY_KEYS profile -----------------------------------
         uint entryKeysSize = (uint)table[EntryKeysId].Payload.Length;
         if (entryKeysSize != PublisherEntryKeysSize)
-            return Program.Fail(
+            return Refuse(
                 $"ENTRY_KEYS is {entryKeysSize} bytes, not {PublisherEntryKeysSize}. This is not " +
                 "the PS5 publisher key profile this repair was derived against, and the body " +
                 "rounding the reseal picks depends on it.");
@@ -265,29 +369,44 @@ internal static class RepairPlayGoCommand
         // SiRepair.Rebuild throws on pfsimage.xml too, but only after the CNT work is done;
         // refusing here keeps the message user-facing and the ordering honest.
         if (regions.Si.Length == 0)
-            return Program.Fail(
+            return Refuse(
                 "this package has no SI segment, so its playgo-chunk.dat and CRC table cannot be " +
                 "rebuilt alongside the CNT's.");
         var siMembers = SiRepair.ReadMembers(regions.Si);
+        foreach (var member in siMembers.OrderBy(m => m.Key, StringComparer.Ordinal))
+            progress.Detail($"SI member {member.Key,-44} {member.Value.Length,9:N0} bytes");
         if (siMembers.ContainsKey(SiRepair.PfsImageXmlPath))
-            return Program.Fail(
+            return Refuse(
                 $"the SI segment carries '{SiRepair.PfsImageXmlPath}', which encodes the full entry " +
                 "table and every digest. Reproducing it is unverified, so the repair would leave " +
                 "the package describing itself incorrectly.");
 
         // ---- Guard 4: generic scenario presentation --------------------------------------
+        progress.Stage("recovering PlayGo values");
         var recovered = PlayGoRecovery.From(table[ChunkDatId].Payload);
+        DumpRecovered(progress, recovered);
         EnsureScenarioJsonIsGeneric(table[ScenarioId].Payload, recovered);
 
         // ---- Guard 3: the body must not move ----------------------------------------------
         // CntRepair.Repair asks the exact question (does the reseal's body_size change?) and
         // throws naming both numbers and the unimplemented body_size-bump fallback. It writes
         // nothing, so reaching it before any output is opened is what makes the refusal safe.
-        var rebuilt = PlayGoEntries.Build(recovered, table[FicmId].Payload);
-        var repaired = CntRepair.Repair(regions.Cnt, contentId, passcode);
-        var recoveredAfter = PlayGoRecovery.From(repaired.NewChunkDat);
+        progress.Stage("generating replacement entries");
+        var rebuilt = PlayGoEntries.Build(recovered, table[FicmId].Payload, progress);
+        progress.Detail($"playgo-chunk.dat     {rebuilt.ChunkDat.Length,9:N0} bytes");
+        progress.Detail($"playgo-ficm.dat      {rebuilt.Ficm.Length,9:N0} bytes");
+        progress.Detail($"playgo-scenario.json {rebuilt.ScenarioJson.Length,9:N0} bytes");
 
-        ReportPlan(path, contentId, problem, passcode, regions, table, recovered, recoveredAfter,
+        progress.Stage("resealing the CNT");
+        var repaired = CntRepair.Repair(regions.Cnt, contentId, passcode, progress);
+        var recoveredAfter = PlayGoRecovery.From(repaired.NewChunkDat);
+        // Re-parsed HERE rather than inside ReportPlan: it is the slowest thing the report needs,
+        // and leaving it there kept the command silent immediately after the "Digests that would
+        // be recomputed" heading — the second silent gap the user reported.
+        var newTable = CntEntryTable.Parse(repaired.Cnt, passcode);
+        progress.Finish();
+
+        ReportPlan(contentId, problem, regions, table, newTable, recovered, recoveredAfter,
                    rebuilt, repaired, siMembers);
 
         if (target is null)
@@ -297,7 +416,9 @@ internal static class RepairPlayGoCommand
             return 0;
         }
 
-        WriteRepaired(regions, repaired, contentId, target, replaceTarget: inPlace);
+        WriteRepaired(regions, repaired, contentId, target, replaceTarget: inPlace,
+                      tempDir: tempDir, progress: progress);
+        progress.Finish();
         Console.WriteLine();
         Console.WriteLine($"written: {target}");
         return 0;
@@ -361,13 +482,33 @@ internal static class RepairPlayGoCommand
         }
     }
 
+    /// <summary>
+    /// The whole recovered record, under <c>--verbose</c> only. The summary in the plan report
+    /// prints the six values a reader usually wants; this prints every field, including the
+    /// scenario labels and the per-chunk language masks the regeneration is keyed to.
+    /// </summary>
+    private static void DumpRecovered(Progress progress, PlayGoRecovery r)
+    {
+        progress.Detail($"contentId          {r.ContentId}");
+        progress.Detail($"chunkCount         {r.ChunkCount}");
+        progress.Detail($"scenarioCount      {r.ScenarioCount}");
+        progress.Detail($"defaultScenarioId  {r.DefaultScenarioId}");
+        progress.Detail($"defaultLanguageId  {r.DefaultLanguageId}");
+        progress.Detail($"languageMask       0x{r.LanguageMask:X}");
+        progress.Detail($"extentCount        {r.ExtentCount}");
+        progress.Detail($"dataSize           {r.DataSize:N0} bytes");
+        progress.Detail($"tailSize           {r.TailSize:N0} bytes");
+        progress.Detail($"totalSize          {r.TotalSize:N0} bytes");
+        progress.Detail($"scenarioLabels     {string.Join(", ", r.ScenarioLabels)}");
+    }
+
     private static void ReportPlan(
-        string path, string contentId, string problem, string passcode,
-        PackageRegions regions, CntEntryTable table,
+        string contentId, string problem,
+        PackageRegions regions, CntEntryTable table, CntEntryTable newTable,
         PlayGoRecovery before, PlayGoRecovery after, PlayGoEntries rebuilt,
         CntRepairResult repaired, IReadOnlyDictionary<string, byte[]> siMembers)
     {
-        Console.WriteLine($"Package:    {path}");
+        Console.WriteLine();
         Console.WriteLine($"Content ID: {contentId}");
         // Why this package needs repairing at all, in the same words `verify --quick` uses.
         Console.WriteLine($"Problem:    {problem}");
@@ -412,7 +553,6 @@ internal static class RepairPlayGoCommand
             Console.WriteLine($"  {(changed ? "changed  " : "unchanged")} {name}");
         }
 
-        var newTable = CntEntryTable.Parse(repaired.Cnt, passcode);
         Console.WriteLine($"  changed   {ChangedDigestRows(table, newTable)} of " +
                           $"{table[DigestsId].Payload.Length / 32} per-entry rows in DIGESTS");
         bool generalDigestsChanged = !table[GeneralDigestsId].Payload.AsSpan()
@@ -475,26 +615,37 @@ internal static class RepairPlayGoCommand
     /// </para>
     /// </summary>
     private static void WriteRepaired(PackageRegions regions, CntRepairResult repaired,
-                                      string contentId, string target, bool replaceTarget)
+                                      string contentId, string target, bool replaceTarget,
+                                      string? tempDir, Progress progress)
     {
+        // The staging file sits beside the target by default, so that File.Move is a rename within
+        // one filesystem. --temp-dir moves it elsewhere on the user's say-so; Run has already
+        // created that directory and warned about the rename it may weaken.
         string directory = Path.GetDirectoryName(Path.GetFullPath(target)) ?? ".";
         Directory.CreateDirectory(directory);
-        string tmp = Path.Combine(directory, Path.GetFileName(target) + ".repair-playgo.tmp");
+        string tmp = Path.Combine(tempDir ?? directory,
+                                  Path.GetFileName(target) + ".repair-playgo.tmp");
 
         try
         {
-            regions.WriteTo(tmp, repaired.Cnt, [], flushToDisk: false);
+            progress.Stage("staging pass 1 (repaired CNT, empty SI)");
+            regions.WriteTo(tmp, repaired.Cnt, [], flushToDisk: false, progress: progress);
 
             byte[] newSi;
-            using (var mount = File.OpenRead(tmp))
-                // The staged path has no Progress threaded through it yet, so the CRC pass stays
-                // silent here exactly as it was before; wiring it up belongs to the CLI task.
+            progress.Stage("computing the mount CRC table");
+            using (var mountFile = File.OpenRead(tmp))
+            {
+                // BuildChunkCrc reduces over the whole mount image — the longest single step of the
+                // repair. It logs its own lines, which Progress.Detail surfaces under --verbose;
+                // the percentage comes from the read position, so a quiet run is not silent either.
+                using var mount = new ReadingProgressStream(mountFile, progress);
                 newSi = SiRepair.Rebuild(regions.Si, contentId, repaired.NewChunkDat,
                                          mount, regions.CntOffset + repaired.Cnt.Length,
-                                         new Progress(TextWriter.Null, verbose: false,
-                                                      isTty: false, totalStages: 1));
+                                         progress);
+            }
 
-            regions.WriteTo(tmp, repaired.Cnt, newSi);
+            progress.Stage("staging pass 2 (repaired CNT and SI)");
+            regions.WriteTo(tmp, repaired.Cnt, newSi, flushToDisk: true, progress: progress);
             CopyFileMode(regions.SourcePath, tmp);
             File.Move(tmp, target, overwrite: replaceTarget);
         }

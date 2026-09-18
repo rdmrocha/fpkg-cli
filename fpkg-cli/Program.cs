@@ -110,6 +110,12 @@ internal static class Program
                                         rewrites a 0.6.8-built package's PlayGo metadata to the
                                         0.6.9 shape without touching the payload. Reports and
                                         writes nothing unless --out or --in-place is given.
+                          --temp-dir <dir>  where the journal (--in-place) or the staging
+                                            file (--out) is written; defaults to beside the
+                                            target. A different device makes --out's final
+                                            rename a non-atomic copy.
+                          --verbose         recovered PlayGo values, per-entry digest work
+                                            and the SI member list
           fpkg extract <file.pkg> <dir> [--passcode <32>] [--raw] [--cnt] [--si]
                                         unpack the inner PPR-PFS files (default),
                                         --raw keeps files compressed, --cnt/--si add

@@ -121,3 +121,57 @@ internal sealed class Progress
             ? $"{elapsed.TotalSeconds:0.0}s"
             : $"{elapsed.TotalMilliseconds:0}ms";
 }
+
+/// <summary>
+/// A pass-through read wrapper that reports the underlying stream's position as a percentage of
+/// its length — the only progress signal available for a library call that reads a stream and
+/// offers no callback of its own (<c>ProsperoPackageArchive.Split</c>,
+/// <c>ProsperoPlayGo.BuildChunkCrc</c>).
+///
+/// <para>
+/// PURELY OBSERVATIONAL. Every member delegates to the inner stream, nothing is buffered,
+/// re-chunked or re-ordered, and <see cref="Dispose"/> does NOT dispose the inner stream — the
+/// caller's own <c>using</c> owns that. Writes and <see cref="SetLength"/> throw rather than
+/// silently succeeding: this is a read-side wrapper and a caller that writes through it has made
+/// a mistake worth hearing about.
+/// </para>
+/// </summary>
+internal sealed class ReadingProgressStream(Stream inner, Progress progress) : Stream
+{
+    public override bool CanRead => inner.CanRead;
+    public override bool CanSeek => inner.CanSeek;
+    public override bool CanWrite => false;
+    public override long Length => inner.Length;
+
+    public override long Position
+    {
+        get => inner.Position;
+        set => inner.Position = value;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        int n = inner.Read(buffer, offset, count);
+        progress.Report(inner.Position, inner.Length);
+        return n;
+    }
+
+    public override int Read(Span<byte> buffer)
+    {
+        int n = inner.Read(buffer);
+        progress.Report(inner.Position, inner.Length);
+        return n;
+    }
+
+    public override int ReadByte()
+    {
+        int b = inner.ReadByte();
+        progress.Report(inner.Position, inner.Length);
+        return b;
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+    public override void Flush() => inner.Flush();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+}

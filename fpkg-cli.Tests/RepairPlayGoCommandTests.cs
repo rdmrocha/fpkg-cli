@@ -6,6 +6,118 @@ public class RepairPlayGoCommandTests
 {
     private static readonly string Passcode = new string('0', 32);
 
+    /// <summary>Runs the command with stdout captured, and restores it whatever happens.</summary>
+    private static string CaptureRun(string[] args)
+    {
+        var captured = new StringWriter();
+        var previous = Console.Out;
+        try
+        {
+            Console.SetOut(captured);
+            RepairPlayGoCommand.Run(args);
+        }
+        finally { Console.SetOut(previous); }
+        return captured.ToString();
+    }
+
+    /// <summary>
+    /// The user-visible complaint this fixes: the command used to run PlayGoInitialChunkProblem,
+    /// PackageRegions.Load and CntEntryTable.Parse — seconds apiece on a 661 MB package — before
+    /// printing a single line. The fix is ORDERING, so the assertion is about order, not presence.
+    /// </summary>
+    [SkippableFact]
+    public void TheDryRunAnnouncesItselfBeforeTheSlowWork()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        string s = CaptureRun(["repair-playgo", TestPackage.Path]);
+
+        int pkg = s.IndexOf("Package:", StringComparison.Ordinal);
+        int problem = s.IndexOf("Problem:", StringComparison.Ordinal);
+        Assert.True(pkg >= 0 && problem > pkg, "Package: must be printed before Problem:");
+        Assert.Contains("reading package", s);
+        // The stage banner has to come out before the report, not with it.
+        Assert.True(s.IndexOf("reading package", StringComparison.Ordinal) < problem);
+    }
+
+    [SkippableFact]
+    public void TheDryRunNumbersEveryStageItRuns()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        string s = CaptureRun(["repair-playgo", TestPackage.Path]);
+
+        Assert.Contains("[1/4] reading package", s);
+        Assert.Contains("[2/4] recovering PlayGo values", s);
+        Assert.Contains("[3/4] generating replacement entries", s);
+        Assert.Contains("[4/4] resealing the CNT", s);
+    }
+
+    [SkippableFact]
+    public void VerboseAddsTheRecoveredValuesAndQuietDoesNot()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        Assert.DoesNotContain("chunkLanguageMasks", CaptureRun(["repair-playgo", TestPackage.Path]));
+        Assert.Contains("chunkLanguageMasks", CaptureRun(["repair-playgo", TestPackage.Path, "--verbose"]));
+    }
+
+    [SkippableFact]
+    public void VerboseAddsThePerEntryDigestsAndTheSiMemberList()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        string quiet = CaptureRun(["repair-playgo", TestPackage.Path]);
+        string loud = CaptureRun(["repair-playgo", TestPackage.Path, "--verbose"]);
+
+        Assert.DoesNotContain("SI member ", quiet);
+        Assert.Contains($"SI member {SiRepair.ChunkDatPath}", loud);
+        Assert.DoesNotContain("digest 4097", quiet);
+        Assert.Contains("digest 4097", loud);
+    }
+
+    /// <summary>
+    /// A --temp-dir that names an existing FILE is a typo. Directory.CreateDirectory would throw an
+    /// IOException naming neither the flag nor the intent, so this refuses first and says which.
+    /// (Where the journal actually lands is RepairJournal.PathFor's own test's business.)
+    /// </summary>
+    [Fact]
+    public void TempDirPointingAtAFileRefusesCleanly()
+    {
+        var file = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        File.WriteAllText(file, "not a directory");
+        var previous = Console.Error;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetError(captured);
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(
+                ["repair-playgo", "nonexistent.pkg", "--temp-dir", file]));
+        }
+        finally { Console.SetError(previous); File.Delete(file); }
+
+        Assert.Contains("--temp-dir", captured.ToString());
+        Assert.Contains("existing file", captured.ToString());
+        // And it refused rather than replacing the file with a directory.
+        Assert.False(Directory.Exists(file));
+    }
+
+    [Fact]
+    public void TempDirIsCreatedWhenItDoesNotExist()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            // The package is missing, so the run refuses — but --temp-dir is validated and created
+            // first, which is the point being asserted.
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(
+                ["repair-playgo", "nonexistent.pkg", "--temp-dir", dir]));
+            Assert.True(Directory.Exists(dir));
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void TempDirWithoutAPathIsRefused() =>
+        Assert.NotEqual(0, RepairPlayGoCommand.Run(
+            ["repair-playgo", "nonexistent.pkg", "--temp-dir"]));
+
     [SkippableFact]
     public void DryRunIsTheDefaultAndWritesNothing()
     {

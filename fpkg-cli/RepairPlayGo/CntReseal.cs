@@ -57,7 +57,7 @@ internal static class CntReseal
     /// </para>
     /// </summary>
     internal static byte[] Seal(byte[] cnt, IReadOnlyList<CntEntry> physical,
-                               string contentId, string passcode)
+                               string contentId, string passcode, Progress? progress = null)
     {
         ulong bodyOffset = CntHeader.U64(cnt, CntHeader.BodyOffset);
         ushort scEntryCount = CntHeader.U16(cnt, CntHeader.ScEntryCount);
@@ -176,6 +176,9 @@ internal static class CntReseal
         // held (zero in a builder-produced package).
         var digestTable = new byte[entryCount * 32];
         digests.Payload.AsSpan(0, Math.Min(digests.Payload.Length, digestTable.Length)).CopyTo(digestTable);
+        // The per-entry SHA3 pass walks the whole body, so the bytes it has digested so far are the
+        // percentage source for this stage. Observation only: nothing below reads `digested` back.
+        long digested = 0;
         for (int i = 1; i < byId.Count; i++)
         {
             var e = byId[i];
@@ -183,6 +186,10 @@ internal static class CntReseal
             byte[] hash = ProsperoImageDigests.Sha3_256(outCnt.AsSpan((int)e.DataOffset, length));
             hash.CopyTo(digestTable.AsSpan(32 * i));
             hash.CopyTo(outCnt.AsSpan((int)digests.DataOffset + 32 * i));
+            digested += length;
+            progress?.Report(digested, (long)bodySize);
+            progress?.Detail($"digest {e.Id,-6} {e.Name,-24} {length,9:N0} bytes -> " +
+                             $"{Convert.ToHexString(hash.AsSpan(0, 8)).ToLowerInvariant()}…");
         }
         digests.Payload = digestTable;
 

@@ -42,7 +42,8 @@ internal static class CntRepair
     /// <summary>Entry alignment inside the body, as <c>CntReseal</c>'s layout walk uses it.</summary>
     private const ulong EntryAlignment = 16;
 
-    internal static CntRepairResult Repair(byte[] cnt, string contentId, string passcode)
+    internal static CntRepairResult Repair(byte[] cnt, string contentId, string passcode,
+                                          Progress? progress = null)
     {
         ulong bodyOffset = CntHeader.U64(cnt, CntHeader.BodyOffset);
         ulong bodySize   = CntHeader.U64(cnt, CntHeader.BodySize);
@@ -154,7 +155,7 @@ internal static class CntRepair
         ficm.Payload     = rebuilt.Ficm;
         scenario.Payload = rebuilt.ScenarioJson;
 
-        var sealedCnt = CntReseal.Seal(cnt, table.Physical, contentId, passcode);
+        var sealedCnt = CntReseal.Seal(cnt, table.Physical, contentId, passcode, progress);
         return new CntRepairResult(sealedCnt, rebuilt.ChunkDat, slackBefore, netDelta);
     }
 

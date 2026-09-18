@@ -14,9 +14,12 @@ internal sealed record PlayGoEntries(byte[] ChunkDat, byte[] Ficm, byte[] Scenar
     private const int FicmHeaderSize = 16;
     private const int FicmBytesPerFile = 2;
 
-    internal static PlayGoEntries Build(PlayGoRecovery r, byte[] originalFicm)
+    internal static PlayGoEntries Build(PlayGoRecovery r, byte[] originalFicm,
+                                       Progress? progress = null)
     {
         var (main, masks) = Layout(r.DataSize, r.ChunkCount, r.LanguageMask);
+        progress?.Detail("mainChunkSizes     " + Head(main, v => $"{v:N0}"));
+        progress?.Detail("chunkLanguageMasks " + Head(masks, v => $"0x{v:X}"));
 
         var chunkDat = ProsperoPlayGo.BuildMultiChunkDat(
             r.ContentId, main, r.TailSize,
@@ -36,6 +39,15 @@ internal sealed record PlayGoEntries(byte[] ChunkDat, byte[] Ficm, byte[] Scenar
 
         return new PlayGoEntries(chunkDat, ficm, scenarioJson);
     }
+
+    /// <summary>
+    /// The first few values of a derived per-chunk list, with a count. These lists are one entry
+    /// per chunk — 100 on the test package — so printing them whole would bury the rest of the
+    /// verbose output in a single wrapped line.
+    /// </summary>
+    private static string Head<T>(IReadOnlyList<T> values, Func<T, string> format, int take = 8) =>
+        string.Join(", ", values.Take(take).Select(format)) +
+        (values.Count > take ? $", … ({values.Count} total)" : "");
 
     /// <summary>
     /// Returns a modified copy of <paramref name="originalFicm"/> with every chunk id zeroed.
