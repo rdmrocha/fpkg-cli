@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../fpkg-cli/fpkg.csproj" />
+  </ItemGroup>
+  <!-- fpkg-cli.csproj has this same Reference (HintPath, Private=false) against LibDir, but a
+       Reference's Private=false means it isn't a public part of the referencing project's
+       compile output, so it does not flow transitively through the ProjectReference above.
+       Later tasks call into LibProsperoPkg types directly (e.g. ProsperoPkgReader), so this
+       project needs its own Reference, resolved the same way fpkg-cli's is. -->
+  <PropertyGroup>
+    <LibDir Condition="'$(LibDir)' == ''">../</LibDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="LibProsperoPkg">
+      <HintPath>$(LibDir)LibProsperoPkg.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

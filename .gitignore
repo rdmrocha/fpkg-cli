@@ -2,6 +2,8 @@
 fpkg-tools/
 fpkg-cli/bin/
 fpkg-cli/obj/
+fpkg-cli.Tests/bin/
+fpkg-cli.Tests/obj/
 fpkg-cli-*.zip
 fpkg-cli-standalone-*.zip
 
