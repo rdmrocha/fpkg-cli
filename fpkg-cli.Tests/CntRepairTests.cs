@@ -45,4 +45,37 @@ public class CntRepairTests
             () => CntRepair.Repair(cnt, TestPackage.ContentId, Passcode));
         Assert.Contains("slack", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
+
+    // The four cases below cover the decision itself, including the POSITIVE-growth case that the
+    // guard exists for and that no real package can reach: every package on disk shrinks. They need
+    // no package, so they are plain [Fact]s and can never silently skip. The integration test above
+    // is what proves the predicate is actually wired into Repair, ahead of Seal.
+
+    [Fact]
+    public void ANegativeDeltaWithAmplePositiveSlackFits()
+    {
+        // This package's real case: the body shrinks by 1048 with 44,675 bytes already spare.
+        Assert.False(CntRepair.ExceedsSlack(netDelta: -1048, slackBefore: 44_675));
+    }
+
+    [Fact]
+    public void APositiveDeltaWellWithinTheSlackFits()
+    {
+        Assert.False(CntRepair.ExceedsSlack(netDelta: 4_096, slackBefore: 44_675));
+    }
+
+    [Fact]
+    public void APositiveDeltaBeyondTheSlackDoesNotFit()
+    {
+        // The case the guard exists for, unreachable through Repair on any package on disk.
+        Assert.True(CntRepair.ExceedsSlack(netDelta: 44_676, slackBefore: 44_675));
+    }
+
+    [Fact]
+    public void ADeltaExactlyEqualToTheSlackFits()
+    {
+        // The boundary is inclusive: the slack counts bytes that are genuinely available, so
+        // consuming all of them puts the body end exactly on the declared end and overruns nothing.
+        Assert.False(CntRepair.ExceedsSlack(netDelta: 44_675, slackBefore: 44_675));
+    }
 }

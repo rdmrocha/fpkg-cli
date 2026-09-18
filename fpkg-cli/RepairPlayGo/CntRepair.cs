@@ -34,8 +34,10 @@ internal static class CntRepair
         var table = CntEntryTable.Parse(cnt, passcode);
 
         // Slack is measured on the ORIGINAL layout, from the last entry in PHYSICAL order — which
-        // is not the last entry by id. The entry's own size is used unaligned: nothing follows it,
-        // so its 16-byte tail padding is part of the free space, not part of the entry.
+        // is not the last entry by id. The entry's own size is used UNALIGNED, deliberately: its
+        // 16-byte alignment tail counts as slack precisely because nothing follows it, so those
+        // padding bytes are free space rather than part of the entry. Aligning here would
+        // under-report the slack by 3 bytes on this package. Do not "fix" it back.
         var last = table.Physical[^1];
         ulong bodyOffset = CntHeader.U64(cnt, CntHeader.BodyOffset);
         ulong bodySize   = CntHeader.U64(cnt, CntHeader.BodySize);
@@ -54,10 +56,13 @@ internal static class CntRepair
             (rebuilt.Ficm.Length         - (long)ficm.Payload.Length) +
             (rebuilt.ScenarioJson.Length - (long)scenario.Payload.Length);
 
-        // Checked BEFORE Seal: Seal has its own, coarser body_size guard, and letting that one fire
-        // first would report the symptom (a body_size change) instead of the cause (no room). A
-        // negative delta is the normal case and must not trip this.
-        if (netDelta > slackBefore)
+        // ORDERING IS LOAD-BEARING: this is checked BEFORE Seal. Seal has its own, coarser
+        // body_size guard that would also fire on an overrun, and letting it go first would report
+        // the symptom (body_size changed) instead of the cause (no room at the end of the body).
+        // The two messages are distinguishable — Seal's does not contain the word "slack" — so the
+        // guard test asserting on "slack" fails loudly if this check is ever moved after Seal,
+        // rather than passing on the wrong exception.
+        if (ExceedsSlack(netDelta, slackBefore))
             throw new InvalidOperationException(
                 $"The repaired PlayGo entries change the CNT body's size by {netDelta:+#;-#;0} " +
                 $"bytes, but the body has only {slackBefore} bytes of slack at its end. Growing the " +
@@ -74,4 +79,21 @@ internal static class CntRepair
         var sealedCnt = CntReseal.Seal(cnt, table.Physical, contentId, passcode);
         return new CntRepairResult(sealedCnt, rebuilt.ChunkDat, slackBefore, netDelta);
     }
+
+    /// <summary>
+    /// The repair's whole fit decision, extracted so it can be tested over cases no real package
+    /// produces — every package on disk has a NEGATIVE <paramref name="netDelta"/>, so the growth
+    /// case this guard exists for is unreachable through <see cref="Repair"/>.
+    /// <para>
+    /// Both arguments are SIGNED and both can legitimately be negative: a shrinking body gives a
+    /// negative delta, and a package whose last entry already overruns its declared body gives a
+    /// negative slack. A comparison done in unsigned arithmetic would invert on either.
+    /// </para>
+    /// <para>
+    /// The boundary is INCLUSIVE — a delta exactly equal to the slack fits and is allowed, because
+    /// the slack is the count of bytes actually available, so consuming all of them lands the body
+    /// end exactly on the declared end and overruns nothing.
+    /// </para>
+    /// </summary>
+    internal static bool ExceedsSlack(long netDelta, long slackBefore) => netDelta > slackBefore;
 }
