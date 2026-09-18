@@ -42,6 +42,10 @@ internal static class RepairPlayGoCommand
     /// </summary>
     private const uint PublisherEntryKeysSize = 0xB80;   // 2944
 
+    /// <summary>Compared OrdinalIgnoreCase, matching how <c>Program.ParseFlags</c> keys them.</summary>
+    private static readonly HashSet<string> KnownFlags =
+        new(["passcode", "out", "in-place", "dry-run"], StringComparer.OrdinalIgnoreCase);
+
     internal static int Run(string[] args)
     {
         if (args.Length < 2 || args[1].StartsWith("--", StringComparison.Ordinal))
@@ -57,8 +61,10 @@ internal static class RepairPlayGoCommand
         bool inPlace = flags.ContainsKey("in-place");
         bool dryRunRequested = flags.ContainsKey("dry-run");
 
+        // ParseFlags keys OrdinalIgnoreCase, so this must too: an ordinal comparison here would
+        // reject --IN-PLACE as unknown after ParseFlags had happily accepted it.
         foreach (var key in flags.Keys)
-            if (key is not ("passcode" or "out" or "in-place" or "dry-run"))
+            if (!KnownFlags.Contains(key))
                 return Program.Fail($"unknown option --{key} (try: fpkg help)");
 
         if (passcode.Length != 32 || passcode.Any(c => c > '\x7f'))
@@ -71,6 +77,12 @@ internal static class RepairPlayGoCommand
             return Program.Fail("--dry-run cannot be combined with --out or --in-place");
         if (!File.Exists(path))
             return Program.Fail($"no such file: {path}");
+        // Everything else in this command refuses rather than degrades; silently replacing an
+        // existing output would be the one exception.
+        if (outPath is not null && File.Exists(outPath))
+            return Program.Fail(
+                $"--out would overwrite an existing file: {Path.GetFullPath(outPath)}. " +
+                "Remove it or choose another path.");
 
         bool write = inPlace || outPath is not null;
 
@@ -171,7 +183,7 @@ internal static class RepairPlayGoCommand
         var repaired = CntRepair.Repair(regions.Cnt, contentId, passcode);
         var recoveredAfter = PlayGoRecovery.From(repaired.NewChunkDat);
 
-        ReportPlan(path, contentId, passcode, regions, table, recovered, recoveredAfter,
+        ReportPlan(path, contentId, problem, passcode, regions, table, recovered, recoveredAfter,
                    rebuilt, repaired, siMembers);
 
         if (target is null)
@@ -235,7 +247,9 @@ internal static class RepairPlayGoCommand
                   "playgo-scenario.json would replace it with generic 'Scenario #N' labels. The " +
                   "stored file is not malformed — it holds per-language scenario titles or " +
                   "descriptions that this repair cannot preserve, so it refuses rather than " +
-                  "discarding them."
+                  "discarding them. (The comparison is over raw JSON text, so a file written " +
+                  "with different whitespace or member ordering trips this too, with the same " +
+                  "outcome and a different cause.)"
                 : $"playgo-scenario.json's '{member.Name}' is {member.Value.GetRawText()} in this " +
                   $"package but would be regenerated as {want.GetRawText()}. The repair derives " +
                   "that value from playgo-chunk.dat, so a disagreement means the two files do not " +
@@ -244,12 +258,15 @@ internal static class RepairPlayGoCommand
     }
 
     private static void ReportPlan(
-        string path, string contentId, string passcode, PackageRegions regions, CntEntryTable table,
+        string path, string contentId, string problem, string passcode,
+        PackageRegions regions, CntEntryTable table,
         PlayGoRecovery before, PlayGoRecovery after, PlayGoEntries rebuilt,
         CntRepairResult repaired, IReadOnlyDictionary<string, byte[]> siMembers)
     {
         Console.WriteLine($"Package:    {path}");
         Console.WriteLine($"Content ID: {contentId}");
+        // Why this package needs repairing at all, in the same words `verify --quick` uses.
+        Console.WriteLine($"Problem:    {problem}");
         Console.WriteLine();
 
         Console.WriteLine("Recovered from playgo-chunk.dat");

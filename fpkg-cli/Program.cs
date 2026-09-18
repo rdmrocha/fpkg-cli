@@ -55,7 +55,16 @@ internal static class Program
                 // deliberately so: PatchCommand is about to rewrite that very assembly.
                 // See the ordering note in PatchCommand.
                 "patch"  => PatchCommand.Run(args.Skip(1).ToArray()),
+                // Takes the FULL args, unlike "patch" above: RepairPlayGoCommand reads args[1] as
+                // the package path and hands args[1..] to ParseFlags, which skips its own first
+                // element. Not an oversight — the two conventions are both in use here.
+#if LIB_HAS_ARCHIVE_067
                 "repair-playgo" => RepairPlayGo.RepairPlayGoCommand.Run(args),
+#else
+                // RepairPlayGo/ is excluded from the compile without this constant (see
+                // fpkg.csproj), so the type does not exist to dispatch to.
+                "repair-playgo" => Fail("repair-playgo needs LibProsperoPkg 0.6.7 or newer"),
+#endif
                 "api"    => Api(args),
                 var cmd  => Fail($"unknown command '{cmd}' (try: fpkg help)"),
             };

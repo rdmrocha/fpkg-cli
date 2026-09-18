@@ -79,6 +79,16 @@
        all evaluate false and the CLI silently compiles down to its oldest supported shape, which
        surfaces as a pile of CS0103s about variables that only exist inside those #ifs. Fail here
        with the actual cause instead. -->
+  <!-- RepairPlayGo/ is the one folder that cannot compile against a pre-0.6.7 library: it calls
+       ProsperoPackageArchive.Split / TryReadCntEntry and Program.PlayGoInitialChunkProblem, which
+       itself lives inside #if LIB_HAS_ARCHIVE_067. Dropping the whole folder from the compile
+       keeps that a clean "needs 0.6.7 or newer" refusal from the dispatch's #else arm instead of
+       a pile of CS0117s. Note the probe is on the XML naming ExportAdditionalContentTemplate, not
+       on Split's presence: a library exposing Split whose XML lacks that member still leaves the
+       constant undefined, and this exclusion is what makes that case degrade cleanly. -->
+  <ItemGroup Condition="!$(DefineConstants.Contains('LIB_HAS_ARCHIVE_067'))">
+    <Compile Remove="RepairPlayGo/**/*.cs" />
+  </ItemGroup>
   <Target Name="RequireLibXml" BeforeTargets="BeforeBuild">
     <Error Condition="!Exists('$(LibXmlPath)')"
            Text="LibProsperoPkg.xml not found at $(LibXmlPath). It sits beside LibProsperoPkg.dll in the release zip and is what the feature probes read; without it the CLI compiles as if built against the oldest supported release." />

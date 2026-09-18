@@ -44,6 +44,57 @@ public class RepairPlayGoCommandTests
     }
 
     /// <summary>
+    /// --in-place must produce exactly what --out produces from the same input, and must not
+    /// leave its temporary file behind. Run on a COPY: the real package is an input to every
+    /// other test in this project.
+    /// </summary>
+    [SkippableFact]
+    public void InPlaceProducesTheSameBytesAsOutAndLeavesNoTempFile()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var dir = Directory.CreateTempSubdirectory("repair-playgo-inplace").FullName;
+        try
+        {
+            var copy = Path.Combine(dir, "copy.pkg");
+            File.Copy(TestPackage.Path, copy);
+            var viaOut = Path.Combine(dir, "via-out.pkg");
+
+            Assert.Equal(0, RepairPlayGoCommand.Run(
+                ["repair-playgo", TestPackage.Path, "--out", viaOut]));
+            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+
+            Assert.Equal(Bytes.Sha256(viaOut), Bytes.Sha256(copy));
+            Assert.Empty(Directory.GetFiles(dir, "*.repair-playgo.tmp"));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
+    /// The property the whole design rests on: every guard runs before anything is written, so a
+    /// refusal under --in-place leaves the target BYTE-IDENTICAL, not merely present. A wrong
+    /// passcode is the cheapest trigger.
+    /// </summary>
+    [SkippableFact]
+    public void AGuardRefusalUnderInPlaceLeavesTheTargetUntouched()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var dir = Directory.CreateTempSubdirectory("repair-playgo-refuse").FullName;
+        try
+        {
+            var copy = Path.Combine(dir, "copy.pkg");
+            File.Copy(TestPackage.Path, copy);
+            var before = Bytes.Sha256(copy);
+
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(
+                ["repair-playgo", copy, "--passcode", new string('1', 32), "--in-place"]));
+
+            Assert.Equal(before, Bytes.Sha256(copy));
+            Assert.Empty(Directory.GetFiles(dir, "*.repair-playgo.tmp"));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
     /// Guard 4's negative path. The test package's own scenario JSON is generic, so without this
     /// the guard ships untested and the first package with localised names is its first test.
     /// </summary>

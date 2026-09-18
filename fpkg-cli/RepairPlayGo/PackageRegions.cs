@@ -67,5 +67,10 @@ internal sealed record PackageRegions(
         }
         dst.Write(cnt);
         dst.Write(si);
+        // Flushed to the DEVICE, not just out of the managed buffer. The caller renames this file
+        // over the target, and the only data-loss window in that sequence is a power loss straight
+        // after the rename leaving a renamed-but-incomplete file. Committing the bytes first
+        // closes it.
+        dst.Flush(flushToDisk: true);
     }
 }
