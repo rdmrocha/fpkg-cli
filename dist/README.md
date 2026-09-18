@@ -121,14 +121,17 @@ Keep the opt-outs in mind only if you know why you want them: with any of them o
 ## Repairing a package's PlayGo metadata
 
 ```sh
-./fpkg repair-playgo GAME.pkg           # dry run: says what it would change
+./fpkg repair-playgo GAME.pkg                              # dry run: says what it would change
 ./fpkg repair-playgo GAME.pkg --out FIXED.pkg
 ./fpkg repair-playgo GAME.pkg --in-place
+./fpkg repair-playgo GAME.pkg --in-place --verbose --temp-dir /elsewhere
 ```
 
 Rewrites the PlayGo metadata of a package built with 0.6.8 — the one `verify` warns about above — to the shape 0.6.9 produces, in seconds. The payload is never decoded, recompressed or modified; it is copied through verbatim, so the result is byte-identical to a 0.6.9 rebuild of the same source without the rebuild. Add `--passcode` if the package's is not the default.
 
-A dry run is what you get unless you pass `--out` or `--in-place`. `--out` refuses to overwrite an existing file. `--in-place` writes beside the target and renames over it only after a complete, flushed write, so the original is never truncated first — either way you need free space beside the target roughly equal to the package's own size.
+A dry run is what you get unless you pass `--out` or `--in-place`. `--out` refuses to overwrite an existing file, and needs free space beside the target roughly equal to the package's own size while it stages the repaired copy before renaming over the target. `--in-place` writes into the target's own footprint instead — only the CNT and SI regions actually change (~64 MB on a 661 MB test package), so no spare disk is needed — and it is crash-recoverable: the two regions it is about to overwrite are journalled to disk first, and a run that finds a journal left over from an interrupted repair restores the package from it and stops, telling you to re-run once the package is whole again.
+
+`--temp-dir <dir>` moves the write path's working file elsewhere: the staging copy for `--out`, the recovery journal for `--in-place`. Point it at a different disk from `--out`'s target and the final rename degrades into a non-atomic copy instead — `fpkg` warns when that looks likely, best-effort only on macOS since `Path.GetFullPath` doesn't see through APFS firmlinks. `--verbose` adds the recovered PlayGo values and per-entry digest work to the numbered stage output that prints either way.
 
 It refuses rather than guessing: a passcode that does not match, a package that is not an Application volume or not the PS5 publisher key profile, a `playgo-scenario.json` carrying scenario names that regeneration cannot preserve, an SI segment carrying `pfsimage.xml` or missing entirely, and a relayout that would change the container's `body_size`. Every check runs before anything is written.
 

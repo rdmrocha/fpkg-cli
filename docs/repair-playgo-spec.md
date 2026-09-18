@@ -255,8 +255,112 @@ Until that fallback exists, a package whose growth exceeds its slack must make `
 
 ```
 fpkg repair-playgo <pkg> [--passcode <32>] [--out <path>] [--in-place] [--dry-run]
+                          [--temp-dir <dir>] [--verbose]
 ```
 `--dry-run` is the default: report the recovered values, the new entry sizes, the slack, and every digest that would change, writing nothing.
+
+## The in-place write, journalled
+
+`--out` stages the whole repaired package beside the target and renames over it: correct, but it
+needs free space roughly equal to the package's own size, and its two passes over that temp file
+mean the payload is read and written twice — **~1.32 GB of I/O and 2× disk**, measured on the test
+package (661,006,510 B).
+
+`--in-place` instead writes the repair into the target's own footprint. That is only possible
+because of two invariants the repair already enforces:
+
+- **The outer PFS never changes.** No digest in the FIH/CNT chain covers the payload (see "PROVEN:
+  the payload never changes" above), so nothing before `CntOffset` is ever touched by a write.
+- **The CNT region's length is fixed.** `CntRepair` refuses any relayout that changes `body_size`,
+  and refuses a CNT region carrying padding past its body. Only the trailing SI changes length, and
+  it is the last thing in the file.
+
+Given both, the repaired CNT drops back into exactly the space the original occupied, and only the
+SI at the tail needs to grow or shrink.
+
+### The five-step sequence
+
+In order, and the order is the design, not a preference — `SetLength` is deliberately last:
+
+1. Write the journal (below) and flush it to the device.
+2. Seek to `CntOffset` and write the repaired CNT, byte for byte the same length as the region it
+   replaces. Flush to the device.
+3. Rebuild the SI: recompute the mount CRC table by reading the *target file itself* — after step 2
+   it already is the repaired mount image, so no staged copy is read instead.
+4. Seek past the CNT, write the new SI, then `SetLength` to the new end of file. Flush to the
+   device.
+5. Delete the journal.
+
+Measured on the test package: CNT region offset 596,770,816, size 63,569,920 (invariant); SI
+665,774 B shrinking to 664,414 B; the file itself shrinks by 1,360 bytes, from 661,006,510 to
+661,005,150.
+
+### The journal
+
+A sidecar file, `<package>.repair-playgo.journal` beside the target by default (or under
+`--temp-dir`), holding the two regions the write is about to overwrite:
+
+```
+ 0   8   magic "FPKGJRN1"
+ 8   8   TargetLength    original file length
+16   8   CntOffset
+24   8   CntLength
+32   8   SiLength
+40  32   Identity        SHA-256 of the FIH block (file[0, 65536)) + the package's full path
+72   .   Cnt             CntLength bytes, the ORIGINAL CNT region
+ .   .   Si              SiLength bytes, the ORIGINAL SI region
+ .  32   Digest          SHA-256 over everything preceding it
+```
+
+~64.2 MB on the test package (63,569,920 + 665,774). It is written and flushed to disk **before**
+the package is opened for writing at all, and deleted only after step 5 above completes — so a
+journal found on disk always means step 2, 3 or 4 was interrupted.
+
+**Why the identity hashes the FIH block plus the full path, not the CNT.** A half-finished run has
+the *repaired* CNT on disk — that is exactly the state the journal exists to detect — so an
+identity computed from the CNT could never match at the moment recovery needs it to. Content alone
+cannot discriminate a package from its own repaired form either: they share the payload by design,
+that being the whole point of the repair, so a hash of anything both states share would match
+either one. The path is the only thing that survives a partial write and still tells the two apart,
+because it is the one input that is not part of the package's own bytes. A package renamed after a
+crash therefore carries an inapplicable journal — its identity can't match either the renamed
+package or, restored the other way round, the original path — which fails safe: the run refuses to
+touch either file rather than guessing.
+
+### Recovery: the discriminator, and the trap
+
+On the next run, before any guard, recovery checks for a journal. If one exists and its identity
+matches, the question is *which side of the write did the crash land on* — and the answer decides
+between overwriting the package (wrong, and it destroys it) and discarding the only copy of its
+original CNT and SI (wrong, and it destroys it just the same). The discriminator is the file's
+**length** against the journal's stored `TargetLength`:
+
+- `length == TargetLength` → steps 2–4 never finished → **restore** from the journal.
+- `length != TargetLength` → the repair ran to completion (`SetLength` is the last act of step 4,
+  so a changed length is only possible after it) → the journal is stale, left behind by a
+  `File.Delete` that failed at step 5 → **delete it, do not restore.**
+
+`PlayGoInitialChunkProblem` — "does this package still need repairing?" — must **not** be used for
+this, even though it looks like the natural check. A file interrupted between steps 2 and 4 has the
+*repaired* CNT on disk with a *stale* SI: the detector reads entries 4097 and 8209 out of the
+already-repaired CNT, finds nothing to flag, and reports the package as fixed — on precisely the
+file that most needs restoring. Using it would delete the journal and leave the user with a broken
+package and no way back.
+
+**The SI-growth guard and the discriminator are coupled.** The length discriminator is only sound
+because the rebuilt SI never grows past the original SI's length — the in-place writer refuses
+outright if it would. If that guard were ever relaxed, a crash partway through writing a longer SI
+could push the file past `TargetLength` before `SetLength` is reached, and recovery would read the
+half-written result as "completed" and discard the journal, leaving unprotected exactly the file
+the discriminator exists to protect. Relaxing the guard makes the discriminator wrong; the two are
+not independent decisions.
+
+### Cost, measured
+
+|                    | `--in-place`                                                              | `--out`                                                        |
+|--------------------|----------------------------------------------------------------------------|-----------------------------------------------------------------|
+| extra disk needed  | none — the journal (~64 MB) is the only new allocation, and it is deleted when the repair completes | roughly the package's own size, beside the target, until the rename |
+| data written       | ~64 MB (the journal, sized to the CNT + SI it captures); the CNT and SI writes themselves land in the file's own existing footprint | ~1.32 GB — two full passes over the ~661 MB staging file |
 
 ## Acceptance
 
