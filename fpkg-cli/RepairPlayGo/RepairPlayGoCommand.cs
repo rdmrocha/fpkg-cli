@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using LibProsperoPkg.PKG;
 using LibProsperoPkg.PlayGo;
@@ -13,8 +12,11 @@ namespace Fpkg.Cli.RepairPlayGo;
 ///
 /// <para>
 /// <b>Dry run is the default.</b> Nothing is written unless <c>--out</c> or <c>--in-place</c> is
-/// given, and even then every one of the six guards below has already run: the whole repair is
-/// computed in memory first, so a refusal can never leave a half-written package behind.
+/// given, and even then every refusal point has already run: the six NUMBERED guards below plus
+/// two structural preconditions — a package with no SI segment, and <c>CntRepair</c>'s
+/// requirement that the CNT region carry no padding past the end of its body. Eight in all, and
+/// the whole repair is computed in memory first, so a refusal can never leave a half-written
+/// package behind.
 /// </para>
 ///
 /// <para>
@@ -88,20 +90,26 @@ internal static class RepairPlayGoCommand
 
         try
         {
-            return Repair(path, passcode, write ? (inPlace ? path : outPath!) : null);
+            return Repair(path, passcode, write ? (inPlace ? path : outPath!) : null, inPlace);
         }
+        // KeyNotFoundException and UnauthorizedAccessException are BACKSTOPS, not the design: the
+        // lookups that could raise the first now route through CntEntryTable.Get and
+        // TryGetValue, which refuse with a message naming what is missing. They are listed so that
+        // a lookup added later without that care still produces an `error:` line rather than a
+        // raw .NET stack trace.
         catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException
-                                      or InvalidOperationException or NotSupportedException)
+                                      or InvalidOperationException or NotSupportedException
+                                      or KeyNotFoundException or UnauthorizedAccessException)
         {
             return Program.Fail(ex.Message, ex);
         }
     }
 
-    private static int Repair(string path, string passcode, string? target)
+    private static int Repair(string path, string passcode, string? target, bool inPlace)
     {
         var regions = PackageRegions.Load(path);
         var table = CntEntryTable.Parse(regions.Cnt, passcode);
-        string contentId = Encoding.ASCII.GetString(regions.Cnt, CntHeader.ContentId, 36).TrimEnd('\0');
+        string contentId = CntHeader.ReadContentId(regions.Cnt);
 
         // ---- Guard 1: the passcode -------------------------------------------------------
         // FIRST, and deliberately: every guard below reads entries that Parse has already
@@ -193,7 +201,7 @@ internal static class RepairPlayGoCommand
             return 0;
         }
 
-        WriteRepaired(regions, repaired, contentId, target);
+        WriteRepaired(regions, repaired, contentId, target, replaceTarget: inPlace);
         Console.WriteLine();
         Console.WriteLine($"written: {target}");
         return 0;
@@ -315,8 +323,17 @@ internal static class RepairPlayGoCommand
             .SequenceEqual(newTable[GeneralDigestsId].Payload);
         Console.WriteLine($"  {(generalDigestsChanged ? "changed  " : "unchanged")} " +
                           $"GENERAL_DIGESTS ({GeneralDigestsId})");
-        Console.WriteLine($"  changed   SI config/{contentId}/playgo-chunk.crc " +
-                          $"({siMembers[$"config/{contentId}/playgo-chunk.crc"].Length / 4:N0} entries)");
+        // Same idiom SiRepair.Rebuild uses for its own required members: a package whose SI has no
+        // CRC table for this content id is one the repair cannot rebuild, and saying so here —
+        // before anything is written — beats an indexer's bare KeyNotFoundException.
+        string crcPath = $"config/{contentId}/playgo-chunk.crc";
+        byte[] crc = siMembers.TryGetValue(crcPath, out var stored)
+            ? stored
+            : throw new InvalidDataException(
+                $"the SI segment has no '{crcPath}' member, so there is no CRC table for this " +
+                "package's content id to recompute. repair-playgo rebuilds that table rather than " +
+                "creating one, so it refuses rather than inventing a member the package never had.");
+        Console.WriteLine($"  changed   SI {crcPath} ({crc.Length / 4:N0} entries)");
         Console.WriteLine($"  changed   SI {SiRepair.ChunkDatPath}");
 
         static void Line(uint id, string name, int from, int to) =>
@@ -346,11 +363,23 @@ internal static class RepairPlayGoCommand
     /// Two passes because the SI's CRC table is computed over the REPAIRED mount image (FIH +
     /// outer PFS + repaired CNT), so those bytes have to exist on disk before the SI can be
     /// rebuilt. The first pass writes an empty SI; its contents cannot affect the CRC, which
-    /// covers only <c>[0, CntOffset + Cnt.Length)</c>.
+    /// covers only <c>[0, CntOffset + Cnt.Length)</c>. That pass is NOT fsynced: only
+    /// <c>BuildChunkCrc</c>, in this same process, reads it back, and the page cache serves that
+    /// read. The second pass keeps the flush, which is what makes the rename safe.
+    /// </para>
+    /// <para>
+    /// The payload is copied through verbatim on each pass — never decoded, recompressed or
+    /// modified — so the repair needs free space beside the target roughly equal to the package's
+    /// own size.
+    /// </para>
+    /// <para>
+    /// <paramref name="replaceTarget"/> is true only for <c>--in-place</c>, whose whole job is to
+    /// replace its target. For <c>--out</c> the rename refuses to clobber, which closes the TOCTOU
+    /// window between the existence check in <see cref="Run"/> and this rename.
     /// </para>
     /// </summary>
     private static void WriteRepaired(PackageRegions regions, CntRepairResult repaired,
-                                      string contentId, string target)
+                                      string contentId, string target, bool replaceTarget)
     {
         string directory = Path.GetDirectoryName(Path.GetFullPath(target)) ?? ".";
         Directory.CreateDirectory(directory);
@@ -358,7 +387,7 @@ internal static class RepairPlayGoCommand
 
         try
         {
-            regions.WriteTo(tmp, repaired.Cnt, []);
+            regions.WriteTo(tmp, repaired.Cnt, [], flushToDisk: false);
 
             byte[] newSi;
             using (var mount = File.OpenRead(tmp))
@@ -366,13 +395,36 @@ internal static class RepairPlayGoCommand
                                          mount, regions.CntOffset + repaired.Cnt.Length);
 
             regions.WriteTo(tmp, repaired.Cnt, newSi);
-            File.Move(tmp, target, overwrite: true);
+            CopyFileMode(regions.SourcePath, tmp);
+            File.Move(tmp, target, overwrite: replaceTarget);
         }
         catch
         {
             // The target is untouched until the Move above, in place or not.
             try { File.Delete(tmp); } catch (Exception) { /* best effort */ }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Carries the source package's Unix permissions onto the temporary file before the rename.
+    /// Without it <c>--in-place</c> silently WIDENS its target: the temp is created with the
+    /// process umask's default (typically 0644) while the test package on disk is 0700, and after
+    /// the rename the mode is the temp's, not the original's. No-op on platforms with no Unix
+    /// file mode, and best effort — a permissions failure must not lose a completed repair.
+    /// </summary>
+    private static void CopyFileMode(string source, string destination)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        try
+        {
+            var mode = File.GetUnixFileMode(source);
+            if (mode != UnixFileMode.None) File.SetUnixFileMode(destination, mode);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                      or PlatformNotSupportedException)
+        {
+            // Best effort: the repaired bytes matter more than the mode bits.
         }
     }
 }

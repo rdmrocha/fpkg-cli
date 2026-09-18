@@ -95,6 +95,31 @@ public class RepairPlayGoCommandTests
     }
 
     /// <summary>
+    /// A package with a real PlayGo defect but no <c>playgo-scenario.json</c> (12288) passes the
+    /// "nothing to repair" gate — which reads only entries 4097 and 8209 — and then reaches guard
+    /// 4's lookup. The command must refuse with a non-zero exit, not die inside an indexer: this
+    /// is the end-to-end proof that the lookup's InvalidDataException reaches the catch filter.
+    /// </summary>
+    [SkippableFact]
+    public void RefusesAPackageMissingPlayGoScenarioJson()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var dir = Directory.CreateTempSubdirectory("repair-playgo-noscenario").FullName;
+        try
+        {
+            var regions = PackageRegions.Load(TestPackage.Path);
+            var doctored = Path.Combine(dir, "no-scenario.pkg");
+            regions.WriteTo(doctored,
+                            CntEntryTableTests.DoctoredCntWithoutScenarioJson(TestPackage.Path),
+                            regions.Si);
+
+            // Dry run: even the refusal path must not be reached via a write.
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(["repair-playgo", doctored]));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
     /// Guard 4's negative path. The test package's own scenario JSON is generic, so without this
     /// the guard ships untested and the first package with localised names is its first test.
     /// </summary>

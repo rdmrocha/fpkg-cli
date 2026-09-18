@@ -71,7 +71,24 @@ internal sealed class CntEntryTable
         _byId = records.ToDictionary(e => e.Id);
     }
 
-    internal CntEntry this[uint id] => _byId[id];
+    /// <summary>
+    /// Every lookup goes through here, including the indexer. A missing id is a property of the
+    /// PACKAGE, not a bug in the caller: a container with no <c>playgo-scenario.json</c> (12288)
+    /// reaches guard 4 with a real PlayGo defect, and a raw
+    /// <see cref="KeyNotFoundException"/> there would surface as a .NET stack trace rather than a
+    /// refusal. <see cref="InvalidDataException"/> is what the command's catch filter converts
+    /// into a clean <c>error:</c> line, and the message names the entry that is absent.
+    /// </summary>
+    internal CntEntry Get(uint id) =>
+        _byId.TryGetValue(id, out var entry)
+            ? entry
+            : throw new InvalidDataException(
+                $"this package's CNT has no entry {id}, which repair-playgo needs in order to " +
+                "regenerate and re-verify the PlayGo metadata. A package missing it is not one " +
+                "this repair can reason about, so it refuses rather than guessing at the entry's " +
+                "contents.");
+
+    internal CntEntry this[uint id] => Get(id);
 
     internal static CntEntryTable Parse(byte[] cnt, string passcode)
     {
@@ -79,7 +96,7 @@ internal sealed class CntEntryTable
         int tableOffset = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
         // Authoritative: this is the same value the builder used when it derived the entry
         // encryption keys, and it lives inside the bytes we are parsing.
-        string contentId = Encoding.ASCII.GetString(cnt, CntHeader.ContentId, 36).TrimEnd('\0');
+        string contentId = CntHeader.ReadContentId(cnt);
 
         var records = new List<CntEntry>((int)entryCount);
         for (int i = 0; i < entryCount; i++)

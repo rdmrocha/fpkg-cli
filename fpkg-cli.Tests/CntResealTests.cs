@@ -92,6 +92,12 @@ public class CntResealTests
         var encrypted = grown.Physical.Where(e => e.Encrypted).ToList();
         Assert.NotEmpty(encrypted);
         var offsetsBefore = encrypted.Select(e => e.DataOffset).ToList();
+        // The PLAINTEXTS, captured before anything moves. The round trip below cannot see the bug
+        // this test exists for on its own: a WriteEntry that copied StoredPayload verbatim instead
+        // of re-encrypting would still land back on the original CNT, because the same ciphertext
+        // would be carried out to the new offset and back. Only decrypting at the NEW offset
+        // distinguishes the two.
+        var plaintextBefore = encrypted.ToDictionary(e => e.Id, e => Convert.ToHexString(e.Payload));
 
         var target = grown[8192];
         var original = target.Payload;
@@ -106,6 +112,13 @@ public class CntResealTests
         Assert.NotEqual(offsetsBefore, encrypted.Select(e => e.DataOffset).ToList());
 
         var shrunk = CntEntryTable.Parse(bigger, Passcode);
+
+        // THE assertion: every encrypted entry, decrypted under the key derived from its NEW meta
+        // record, yields the plaintext it had before the move. Ciphertext copied verbatim would
+        // decrypt to garbage here — which is precisely the failure the round trip below hides.
+        foreach (var (id, want) in plaintextBefore)
+            Assert.Equal(want, Convert.ToHexString(shrunk[id].Payload));
+
         shrunk[8192].Payload = original;
         var back = CntReseal.Seal(bigger, shrunk.Physical, contentId, Passcode);
 

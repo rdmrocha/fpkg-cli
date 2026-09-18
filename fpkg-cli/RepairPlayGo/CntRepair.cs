@@ -1,5 +1,3 @@
-using System.Text;
-
 namespace Fpkg.Cli.RepairPlayGo;
 
 /// <summary>
@@ -36,6 +34,7 @@ internal static class CntRepair
     private const uint ScenarioId  = 12288;  // playgo-scenario.json
     private const uint EntryKeysId = 16;
     private const uint MetasId     = 256;
+    private const uint DigestsId   = 1;
 
     /// <summary>Mirrors <c>CntReseal</c>'s own constant: 0xB80 selects the 64-KiB body rounding.</summary>
     private const uint PublisherEntryKeysSize = 0xB80;
@@ -75,8 +74,7 @@ internal static class CntRepair
         // than dropped — Seal's signature takes one, and an explicit argument documents at the call
         // site which id the output is bound to — but it is now verified against the header instead
         // of trusted.
-        string headerContentId = Encoding.ASCII
-            .GetString(cnt, CntHeader.ContentId, 36).TrimEnd('\0');
+        string headerContentId = CntHeader.ReadContentId(cnt);
         if (!string.Equals(contentId, headerContentId, StringComparison.Ordinal))
             throw new ArgumentException(
                 $"The content id passed in ('{contentId}') is not the one in the CNT header " +
@@ -118,9 +116,12 @@ internal static class CntRepair
                 ChunkDatId => (uint)rebuilt.ChunkDat.Length,
                 FicmId     => (uint)rebuilt.Ficm.Length,
                 ScenarioId => (uint)rebuilt.ScenarioJson.Length,
-                // METAS' payload IS the table it describes, so Seal sizes it from the entry count
-                // rather than from the stale payload. Mirrored here for the same reason.
+                // METAS' payload IS the table it describes and DIGESTS' is one 32-byte row per
+                // entry, so Seal sizes both from the entry count rather than from the stale
+                // payload. Mirrored here for the same reason: a prediction that used the stale
+                // lengths would disagree with Seal's own walk the moment the id set changed.
                 MetasId    => (uint)(table.Physical.Count * 32),
+                DigestsId  => (uint)(table.Physical.Count * 32),
                 _          => (uint)e.Payload.Length,
             })
             .ToList();

@@ -57,6 +57,46 @@ public class CntEntryTableTests
         Assert.Throws<InvalidDataException>(() => CntEntryTable.Parse(cnt, new string('0', 32)));
     }
 
+    /// <summary>
+    /// A missing entry is a property of the PACKAGE, not a caller bug. Program.PlayGoInitialChunkProblem
+    /// reads only 4097 and 8209, so a container with a real PlayGo defect but no
+    /// <c>playgo-scenario.json</c> (12288) sails past the "nothing to repair" gate and reaches
+    /// guard 4's lookup. A bare <see cref="KeyNotFoundException"/> there is a .NET stack trace;
+    /// this pins the clean refusal that names the entry instead.
+    /// </summary>
+    [SkippableFact]
+    public void RefusesCleanlyWhenAnEntryIsMissing()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var cnt = DoctoredCntWithoutScenarioJson(TestPackage.Path);
+
+        var t = CntEntryTable.Parse(cnt, new string('0', 32));
+        Assert.Equal(26, t.Physical.Count);
+
+        var ex = Assert.Throws<InvalidDataException>(() => t[12288]);
+        Assert.Contains("12288", ex.Message);
+    }
+
+    /// <summary>
+    /// Drops entry 12288's meta record by decrementing <c>entry_count</c>. 12288 is the highest id
+    /// in this package, so it is the LAST record of the id-sorted on-disk table and dropping it
+    /// leaves the table both sorted and contiguous — asserted here, because the trick is silently
+    /// wrong for any other entry. The payload bytes stay where they are; nothing reads them once
+    /// no meta record points at them.
+    /// </summary>
+    internal static byte[] DoctoredCntWithoutScenarioJson(string packagePath)
+    {
+        var cnt = (byte[])PackageRegions.Load(packagePath).Cnt.Clone();
+        uint count = CntHeader.U32(cnt, CntHeader.EntryCount);
+        int table = (int)CntHeader.U32(cnt, CntHeader.EntryTableOffset);
+        Assert.Equal(12288u, CntHeader.U32(cnt, table + (int)(count - 1) * 32));
+
+        CntHeader.SetU32(cnt, CntHeader.EntryCount, count - 1);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(
+            cnt.AsSpan(CntHeader.EntryCount2), (ushort)(count - 1));
+        return cnt;
+    }
+
     [SkippableFact]
     public void MetaRecordsRoundTripThroughTheLibrarysCodec()
     {

@@ -75,8 +75,13 @@ public class SiRepairTests
             var gotCrc  = SiRepair.ReadMembers(got)[$"config/{TestPackage.ContentId}/playgo-chunk.crc"];
             var origCrc = SiRepair.ReadMembers(orig.Si)[$"config/{TestPackage.ContentId}/playgo-chunk.crc"];
             Assert.Equal(origCrc.Length, gotCrc.Length);                 // body_size unchanged
-            Assert.Equal(Convert.ToHexString(origCrc.AsSpan(0, 9106 * 4)),
-                         Convert.ToHexString(gotCrc.AsSpan(0, 9106 * 4))); // only the CNT tail moves
+            // Derived, not magic: one 4-byte CRC per 64-KiB block, and every block that lies
+            // wholly BEFORE the CNT region covers payload bytes the repair copies through
+            // verbatim. Only the CNT tail can move, so the prefix must be identical.
+            int blocksBeforeCnt = (int)(orig.CntOffset / 65536);
+            Assert.Equal(9106, blocksBeforeCnt);
+            Assert.Equal(Convert.ToHexString(origCrc.AsSpan(0, blocksBeforeCnt * 4)),
+                         Convert.ToHexString(gotCrc.AsSpan(0, blocksBeforeCnt * 4)));
             Bytes.AssertEqual(wantCrc, gotCrc);
             Bytes.AssertEqual(want, got);
         }

@@ -73,6 +73,26 @@ internal static class CntReseal
         foreach (var e in physical)
             e.DataSize = (uint)e.Payload.Length;
         metas.DataSize = entryCount * 32;   // METAS' payload IS the table it describes.
+        // DIGESTS gets the same treatment, and for the same reason: step 5 below builds
+        // `new byte[entryCount * 32]` and writes a row for EVERY entry, so the layout walk has to
+        // reserve that much. Sizing it from the stale payload would reserve the OLD entry count's
+        // worth on an insert and step 5's writes would then run past DIGESTS into the next entry.
+        // A no-op on a package whose id set is unchanged — which is the only case reachable today
+        // — but without it the insert-safety the step-5 comment claims is not actually there.
+        digests.DataSize = entryCount * 32;
+
+        // Step 5 writes RAW SHA3 hashes straight into the container at digests.DataOffset. That is
+        // correct only while DIGESTS is stored in the clear (flags1 = 0x40000000 on this package,
+        // encryption bit clear). If it ever carried the encryption bit, those writes would stamp
+        // plaintext over ciphertext, digests.Payload would never be re-encrypted, and
+        // digest_table_hash would be taken over the plaintext — so the container's own digest chain
+        // would verify happily over the corruption. Refuse instead of writing that.
+        if (digests.Encrypted)
+            throw new InvalidOperationException(
+                "this package's DIGESTS entry (1) is encrypted. The reseal writes the digest table " +
+                "into the container in the clear and takes digest_table_hash over the plaintext, so " +
+                "it cannot handle an encrypted DIGESTS entry: the result would be a corrupted table " +
+                "carrying digests that still verified.");
 
         ulong num = bodyOffset;
         foreach (var e in physical)
@@ -179,12 +199,12 @@ internal static class CntReseal
         scEntries.Add(metas);
         scEntries.Add(digests);
 
-        var sc1 = new MemoryStream();
+        using var sc1 = new MemoryStream();
         foreach (var e in scEntries)
             sc1.Write(outCnt, (int)e.DataOffset, (int)e.DataSize);
         CntHeader.SetBytes(outCnt, CntHeader.ScEntries1Hash, ProsperoImageDigests.Sha3_256(sc1.ToArray()));
 
-        var sc2 = new MemoryStream();
+        using var sc2 = new MemoryStream();
         foreach (var e in scEntries.Take(scEntries.Count - 1))
         {
             int size = e.Id == MetasId ? scEntryCount * 0x20 : (int)e.DataSize;

@@ -16,7 +16,14 @@ internal static class CntHeader
     internal const int MainEntDataSize    = 28;   // u32
     internal const int BodyOffset         = 32;   // u64
     internal const int BodySize           = 40;   // u64
-    internal const int MandatorySize      = 48;   // u64
+    /// <summary>
+    /// DESPITE THE NAME, this field holds an OFFSET, not a size: header[48] is IMAGEDIGS' (1034)
+    /// <c>DataOffset</c>, which is what <c>PkgWriter.WriteHeader</c> stores and what
+    /// <c>CntReseal</c> writes back. The name matches the library's own <c>mandatory_size</c>
+    /// field and is kept for that reason only. Do not "correct" the value to
+    /// <c>mandatory.DataSize</c> to match the name — that silently breaks fixed point 1.
+    /// </summary>
+    internal const int MandatorySize      = 48;   // u64 — an OFFSET; see above
     internal const int ContentId          = 64;   // 48-byte ASCII slot
     internal const int DrmType            = 112;  // u32
     internal const int ContentType        = 116;  // u32
@@ -36,6 +43,15 @@ internal static class CntHeader
     internal const int DescDigest         = 1312; // 64 B
     internal const int PackageDigest      = 4064; // 32 B
     internal const int HeaderWrap         = 4096;
+
+    /// <summary>
+    /// The container's own content id: 36 ASCII bytes at <see cref="ContentId"/>, NUL-trimmed.
+    /// This is the authoritative value — it is what the builder derived the entry encryption keys
+    /// from — so every site that needs it reads it through here rather than re-spelling the
+    /// offset, the length and the trim.
+    /// </summary>
+    internal static string ReadContentId(byte[] cnt) =>
+        System.Text.Encoding.ASCII.GetString(cnt, ContentId, 36).TrimEnd('\0');
 
     internal static ushort U16(ReadOnlySpan<byte> cnt, int off) => BinaryPrimitives.ReadUInt16BigEndian(cnt[off..]);
     internal static uint   U32(ReadOnlySpan<byte> cnt, int off) => BinaryPrimitives.ReadUInt32BigEndian(cnt[off..]);

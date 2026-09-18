@@ -50,8 +50,15 @@ internal sealed record PackageRegions(
     /// Streams <c>[0, CntOffset)</c> — the header, FIH and the whole outer PFS — verbatim from
     /// the source file, then writes <paramref name="cnt"/> and <paramref name="si"/>. Never reads
     /// the outer PFS into memory.
+    /// <para>
+    /// <paramref name="flushToDisk"/> defaults to true — the safe behaviour every caller had
+    /// before it existed. Pass false only for an INTERMEDIATE pass whose bytes are read back by
+    /// this same process and then overwritten: an fsync of ~630 MB is the single most expensive
+    /// thing this command does, and the page cache serves an in-process read-back just as well.
+    /// The pass whose output is about to be renamed over the target must keep it.
+    /// </para>
     /// </summary>
-    internal void WriteTo(string outputPath, byte[] cnt, byte[] si)
+    internal void WriteTo(string outputPath, byte[] cnt, byte[] si, bool flushToDisk = true)
     {
         using var src = File.OpenRead(SourcePath);
         using var dst = File.Create(outputPath);
@@ -70,7 +77,7 @@ internal sealed record PackageRegions(
         // Flushed to the DEVICE, not just out of the managed buffer. The caller renames this file
         // over the target, and the only data-loss window in that sequence is a power loss straight
         // after the rename leaving a renamed-but-incomplete file. Committing the bytes first
-        // closes it.
-        dst.Flush(flushToDisk: true);
+        // closes it. An intermediate pass has no such window and opts out.
+        dst.Flush(flushToDisk);
     }
 }
