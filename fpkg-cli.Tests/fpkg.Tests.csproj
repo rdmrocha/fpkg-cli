@@ -11,7 +11,20 @@
     <!-- HintPath must win. Without this, any stray LibProsperoPkg.dll under the project
          directory (e.g. a previous -o output folder) silently outranks LibDir. -->
     <AssemblySearchPaths>{HintPathFromItem};{TargetFrameworkDirectory};{RawFileName}</AssemblySearchPaths>
+    <LibXmlPath>$([System.IO.Path]::Combine('$(MSBuildThisFileDirectory)', '$(LibDir)', 'LibProsperoPkg.xml'))</LibXmlPath>
   </PropertyGroup>
+  <!-- The same LIB_HAS_ARCHIVE_067 probe fpkg.csproj runs (it reads LibProsperoPkg.xml for
+       ExportAdditionalContentTemplate). When it does not fire, fpkg.csproj drops RepairPlayGo/
+       from the compile and the CLI refuses the command cleanly — but most of THIS project's tests
+       cover repair-playgo, so they would all fail to resolve types that no longer exist. That
+       surfaces as a pile of CS0103s naming files whose real problem is the library version, which
+       is the same trap RequireLibXml below exists to avoid. One sentence beats the cascade.
+       Deliberately NOT a per-file exclusion list: it would span eight tasks' test files and rot
+       the moment a test is added or renamed, to fix a developer-only scenario. -->
+  <Target Name="RequireArchive067" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(LibXmlPath)') Or !$([System.IO.File]::ReadAllText('$(LibXmlPath)').Contains('ProsperoPackageArchive.ExportAdditionalContentTemplate'))"
+           Text="The fpkg test suite requires LibProsperoPkg 0.6.7 or newer. Most of it covers `fpkg repair-playgo`, which is itself gated on that release (fpkg.csproj drops RepairPlayGo/ from the compile without it, and the command refuses with the same version message). Point LibDir at a 0.6.7+ release folder, or run the CLI's own build alone." />
+  </Target>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
