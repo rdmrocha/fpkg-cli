@@ -56,9 +56,10 @@ public class InPlaceWriterTests
 
     /// <summary>
     /// A journal already on disk is the sole surviving copy of an interrupted repair's original
-    /// CNT and SI, and <see cref="RepairJournal.Write"/> opens with <c>FileMode.Create</c>, so the
-    /// first act of a naive re-run would be to truncate the only recovery data there is. The
-    /// refusal is enforced here, at the point of danger, not left to the caller.
+    /// CNT and SI, so the first act of a naive re-run would be to truncate the only recovery data
+    /// there is. <see cref="RepairJournal.Write"/> opens with <c>FileMode.CreateNew</c> and refuses
+    /// it at the syscall; this pins the writer's own earlier, cheaper refusal, which must leave both
+    /// the journal and the package untouched.
     /// </summary>
     [SkippableFact]
     public void RefusesToRunWhenAJournalFromAnInterruptedRepairIsStillPresent()
@@ -143,6 +144,134 @@ public class InPlaceWriterTests
             Assert.Equal(originalLength, new FileInfo(copy).Length);
         }
         finally { File.Delete(copy); File.Delete(journal); File.Delete(reference); }
+    }
+
+    /// <summary>
+    /// The other half of the recoverability property, from the CLI's side: a journal found at the
+    /// top of a run means the previous run died mid-write, so the run must put the package back and
+    /// stop — not repair the half-written file it found.
+    /// </summary>
+    [SkippableFact]
+    public void AnInterruptedRepairIsRestoredOnTheNextRun()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var copy = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var journal = copy + RepairJournal.Suffix;
+        try
+        {
+            File.Copy(TestPackage.Path, copy);
+            var before = Bytes.Sha256(copy);
+            var regions = PackageRegions.Load(copy);
+
+            // Simulate a crash: journal written, CNT half-written, SI never reached. The file's
+            // length is untouched, which is exactly what tells recovery the repair never finished.
+            RepairJournal.Write(journal, copy, regions, new Progress(TextWriter.Null, false, false, 1));
+            using (var fs = new FileStream(copy, FileMode.Open, FileAccess.Write))
+            {
+                fs.Position = regions.CntOffset;
+                fs.Write(new byte[1_000_000]);
+            }
+            Assert.NotEqual(before, Bytes.Sha256(copy));
+
+            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+
+            Assert.Equal(before, Bytes.Sha256(copy));
+            Assert.False(File.Exists(journal), "the journal must be removed after a successful restore");
+        }
+        finally { File.Delete(copy); File.Delete(journal); }
+    }
+
+    /// <summary>
+    /// The destructive case, and the reason recovery discriminates on the file's LENGTH rather than
+    /// on whether the package still looks broken.
+    ///
+    /// <para>
+    /// If <c>File.Delete</c> fails at the very end of a COMMITTED repair, the journal outlives a
+    /// good result. Naive recovery would restore the original and silently undo a success. Worse,
+    /// the obvious discriminator — asking <c>PlayGoInitialChunkProblem</c> whether the package still
+    /// needs repairing — gets the truly dangerous case backwards: a package interrupted mid-write
+    /// carries the REPAIRED CNT with a stale SI, so the detector reads entries 4097/8209 from the
+    /// repaired CNT, reports "nothing wrong", and skips restoring the one file that most needs it.
+    /// </para>
+    /// </summary>
+    [SkippableFact]
+    public void AStaleJournalAfterACompletedRepairIsDiscardedInsteadOfRollingItBack()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var copy = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var journal = copy + RepairJournal.Suffix;
+        var setAside = copy + ".set-aside-journal";
+        try
+        {
+            File.Copy(TestPackage.Path, copy);
+            var regions = PackageRegions.Load(copy);
+            var contentId = CntHeader.ReadContentId(regions.Cnt);
+            var silent = new Progress(TextWriter.Null, false, false, 4);
+
+            // The journal the repair itself writes, kept aside so it can be put back afterwards —
+            // which is precisely the state a failing File.Delete at step 5 leaves on disk.
+            RepairJournal.Write(setAside, copy, regions, silent);
+
+            var repaired = CntRepair.Repair(regions.Cnt, contentId, Passcode);
+            InPlaceWriter.Write(regions, repaired, contentId, copy, journal, silent);
+
+            var repairedSha = Bytes.Sha256(copy);
+            var repairedLength = new FileInfo(copy).Length;
+            // Non-vacuous: the discriminator only works because a completed repair changes the
+            // file's length. If this ever stopped holding, the test below would pass for the wrong
+            // reason.
+            Assert.NotEqual(new FileInfo(TestPackage.Path).Length, repairedLength);
+
+            File.Move(setAside, journal);
+
+            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+
+            Assert.Equal(repairedSha, Bytes.Sha256(copy));
+            Assert.Equal(repairedLength, new FileInfo(copy).Length);
+            Assert.False(File.Exists(journal), "a stale journal must be removed, not acted on");
+        }
+        finally { File.Delete(copy); File.Delete(journal); File.Delete(setAside); }
+    }
+
+    /// <summary>
+    /// A journal that belongs to some OTHER package must be acted on in neither direction. Restoring
+    /// from it would write one package's regions over another; discarding it would destroy the other
+    /// package's only way back. Both are unrecoverable, so the only correct answer is to refuse and
+    /// let a human sort out which package the journal belongs to.
+    ///
+    /// <para>
+    /// Not covered by the length discriminator: a foreign journal's <c>TargetLength</c> generally
+    /// differs from the target's, which on its own reads as "a completed repair, discard the
+    /// journal" — the destructive answer.
+    /// </para>
+    /// </summary>
+    [SkippableFact]
+    public void AJournalBelongingToAnotherPackageIsNeitherRestoredNorDiscarded()
+    {
+        Skip.IfNot(TestPackage.Exists && Oracle.Available, "artifacts not present");
+        var mine = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var theirs = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var theirJournal = theirs + RepairJournal.Suffix;
+        var mineJournal = mine + RepairJournal.Suffix;
+        try
+        {
+            File.Copy(TestPackage.Path, theirs);
+            File.Copy(Oracle.Path, mine);
+            RepairJournal.Write(theirJournal, theirs, PackageRegions.Load(theirs),
+                                new Progress(TextWriter.Null, false, false, 1));
+            // Same bytes, now sitting where MY package's journal would live.
+            File.Move(theirJournal, mineJournal);
+
+            var before = Bytes.Sha256(mine);
+            var journalBefore = Bytes.Sha256(mineJournal);
+
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(["repair-playgo", mine, "--in-place"]));
+
+            Assert.Equal(before, Bytes.Sha256(mine));
+            Assert.True(File.Exists(mineJournal), "a foreign journal must not be destroyed either");
+            Assert.Equal(journalBefore, Bytes.Sha256(mineJournal));
+        }
+        finally { File.Delete(mine); File.Delete(theirs); File.Delete(mineJournal); File.Delete(theirJournal); }
     }
 
     /// <summary>

@@ -45,14 +45,13 @@ internal static class InPlaceWriter
                                string contentId, string target, string journalPath,
                                Progress progress, Action? faultAfterCntWrite = null)
     {
-        // A journal already on disk is an interrupted repair's ONLY copy of the original CNT and
-        // SI, and RepairJournal.Write opens with FileMode.Create — so a re-run's first act would
-        // be to destroy the very data needed to undo the half-finished one. Refused here, at the
-        // point of danger, rather than trusting every caller to have checked.
+        // RepairJournal.Write opens with FileMode.CreateNew and refuses this on its own, so an
+        // existing journal can never be truncated even if this check were dropped. It is kept
+        // because it is cheap and it comes FIRST: refusing here costs nothing, whereas the refusal
+        // inside Write arrives only after ~64 MB of journalling has been staged, and the caller
+        // gets the same actionable message either way.
         if (File.Exists(journalPath))
-            throw new InvalidOperationException(
-                $"a repair journal is already present at '{journalPath}'; an interrupted repair must be " +
-                "recovered (or the journal deliberately removed) before another in-place repair can start");
+            throw new InvalidOperationException(RepairJournal.AlreadyPresent(journalPath));
 
         // The load-bearing invariant. If these ever differ, writing in place would either shift the
         // SI over live CNT bytes or leave a hole, and no amount of padding makes that correct.

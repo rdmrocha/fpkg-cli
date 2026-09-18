@@ -122,13 +122,6 @@ internal sealed record RepairJournal(
     /// into the repair, so the caller may open the package for writing the moment this returns.
     ///
     /// <para>
-    /// Caller ordering constraint: this opens <paramref name="journalPath"/> with
-    /// <see cref="FileMode.Create"/> and so truncates any journal already there. A run that finds
-    /// an existing journal must therefore offer recovery from it BEFORE calling this, or a re-run
-    /// after an interruption destroys the very data that would have undone it.
-    /// </para>
-    ///
-    /// <para>
     /// "Durable" here means <c>fsync</c>, which is what <c>Flush(flushToDisk: true)</c> maps to on
     /// macOS — not <c>F_FULLFSYNC</c>, and the containing directory is never synced. So a returned
     /// <c>Write</c> means the journal survives a process or kernel crash, not that it is certain to
@@ -155,8 +148,7 @@ internal sealed record RepairJournal(
         // Hashed as it is written rather than over a buffered second copy — the payload is ~64 MB
         // and there is no reason to hold it twice.
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        using (var journal = new FileStream(journalPath, FileMode.Create, FileAccess.Write,
-                                            FileShare.None))
+        using (var journal = CreateNew(journalPath))
         {
             journal.Write(header);
             hash.AppendData(header);
@@ -179,6 +171,37 @@ internal sealed record RepairJournal(
             // mutating the package, and a journal still sitting in the page cache would not
             // survive the very failure it exists for.
             journal.Flush(flushToDisk: true);
+        }
+    }
+
+    /// <summary>
+    /// The one wording for "there is already a journal here", shared by this class and by
+    /// <see cref="InPlaceWriter"/> so a caller cannot meet two different explanations of the same
+    /// condition.
+    /// </summary>
+    internal static string AlreadyPresent(string journalPath) =>
+        $"a repair journal is already present at '{journalPath}'; an interrupted repair must be " +
+        "recovered (or the journal deliberately removed) before another in-place repair can start";
+
+    /// <summary>
+    /// <see cref="FileMode.CreateNew"/>, never <see cref="FileMode.Create"/>: an existing journal is
+    /// an interrupted repair's ONLY copy of the original CNT and SI, and <c>Create</c> truncates —
+    /// so a re-run's very first act would be to destroy the data that would have undone it. The
+    /// refusal lives here, at the syscall, rather than only in the callers, so no future caller can
+    /// reintroduce the truncation by forgetting to check.
+    /// </summary>
+    private static FileStream CreateNew(string journalPath)
+    {
+        try
+        {
+            return new FileStream(journalPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        }
+        // CreateNew reports an existing file as a plain IOException, which is indistinguishable by
+        // type from a full disk or a dead device — hence the File.Exists re-check rather than a
+        // blanket translation that would mislabel a genuine I/O failure as a stale journal.
+        catch (IOException) when (File.Exists(journalPath))
+        {
+            throw new InvalidOperationException(AlreadyPresent(journalPath));
         }
     }
 

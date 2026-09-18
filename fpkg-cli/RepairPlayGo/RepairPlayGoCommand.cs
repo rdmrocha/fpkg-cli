@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using LibProsperoPkg.PKG;
 using LibProsperoPkg.PlayGo;
@@ -105,8 +106,103 @@ internal static class RepairPlayGoCommand
         }
     }
 
+    /// <summary>
+    /// Crash recovery, run before anything else: a journal beside the package means a previous
+    /// in-place repair was interrupted, so this puts the package back and stops. Returns <c>0</c>
+    /// when a journal was found and handled — the caller must exit with it — and <c>-1</c> when
+    /// there was nothing to do. Any other non-negative value is likewise the caller's exit code:
+    /// the journal was found, could not safely be acted on, and the run must stop.
+    ///
+    /// <para>
+    /// It restores and then STOPS rather than restoring and retrying. Retrying would hide the
+    /// interruption from the user entirely, and if a bug caused it, would walk straight back into
+    /// it.
+    /// </para>
+    /// </summary>
+    internal static int RecoverIfNeeded(string target, string? tempDir, Progress progress)
+    {
+        string journalPath = RepairJournal.PathFor(target, tempDir);
+        var journal = RepairJournal.TryRead(journalPath);
+        // Absent, foreign, truncated or torn: nothing this can safely undo. A file that is present
+        // but unreadable is deliberately NOT deleted here — it is not ours to destroy, and
+        // InPlaceWriter refuses on File.Exists alone, so the run still stops with a message naming
+        // the path rather than writing over a package whose history is unknown.
+        if (journal is null)
+            return -1;
+
+        // Both branches below act destructively — one overwrites the package, the other destroys
+        // the only recovery data there is — so the journal must be proven to BELONG to this package
+        // before either runs. RepairJournal.Restore makes the same check itself, but the discard
+        // branch never reaches Restore, and deleting another package's journal is exactly as
+        // unrecoverable as restoring from it.
+        if (!CryptographicOperations.FixedTimeEquals(RepairJournal.ComputeIdentity(target),
+                                                     journal.Identity))
+            return Program.Fail(
+                $"the repair journal '{journalPath}' was written for a different package than " +
+                $"'{target}'. Restoring from it would destroy this package and discarding it would " +
+                "destroy the other's only way back, so this refuses to do either. Move or delete " +
+                "the journal by hand once you know which package it belongs to.");
+
+        // WHICH SIDE of the write did the crash fall on? Get this wrong and the answer destroys the
+        // user's package, so the discriminator is chosen with care.
+        //
+        // NOT PlayGoInitialChunkProblem. Asking "does this package still need repairing?" is the
+        // obvious test and it is backwards precisely where it matters: a repair interrupted between
+        // steps 2 and 4 has the REPAIRED CNT on disk with a stale SI, so the detector reads entries
+        // 4097/8209 out of the repaired CNT, finds nothing wrong, and reports "completed" — on
+        // exactly the damaged file that most needs restoring. That answer would delete the journal
+        // and leave a broken package with no way back.
+        //
+        // The file's LENGTH instead. SetLength is the last act of step 4, and the rebuilt SI is a
+        // different size from the original, so:
+        //   length == TargetLength -> steps 2-4 did not run to completion  -> RESTORE
+        //   length != TargetLength -> the repair ran through; the journal outlived a SUCCESS
+        //                             (a File.Delete that failed at step 5) -> DISCARD, never roll back
+        // Length is also the one property a half-written CNT cannot forge: step 2 writes the
+        // repaired CNT into its own footprint, byte for byte, and changes nothing about the size.
+        // The residual risk is a rebuilt SI that happens to be exactly as long as the original,
+        // which would read as "interrupted" and restore a good repair — annoying, recoverable, and
+        // the right direction to be wrong in.
+        long actualLength = new FileInfo(target).Length;
+
+        if (actualLength != journal.TargetLength)
+        {
+            File.Delete(journalPath);
+            Console.WriteLine($"Package: {target}");
+            Console.WriteLine("A repair journal was left behind by a repair that DID complete " +
+                              $"(the package is {actualLength:N0} bytes, not the pre-repair " +
+                              $"{journal.TargetLength:N0}).");
+            Console.WriteLine("The journal has been removed. The package itself was not touched — " +
+                              "restoring it would have undone a successful repair.");
+            return 0;
+        }
+
+        RepairJournal.Restore(journalPath, target, progress);
+        progress.Finish();
+        // Only after the restore is on the device: while the journal exists the recovery is
+        // repeatable, and deleting it first would make an interrupted recovery unrecoverable.
+        File.Delete(journalPath);
+
+        Console.WriteLine($"Package: {target}");
+        Console.WriteLine("A previous in-place repair of this package was interrupted before it " +
+                          "finished.");
+        Console.WriteLine("The package has been restored to its pre-repair state and the journal " +
+                          "removed.");
+        Console.WriteLine("Nothing else was done. Re-run the repair when you are ready.");
+        return 0;
+    }
+
     private static int Repair(string path, string passcode, string? target, bool inPlace)
     {
+        // BEFORE every guard, deliberately. The guards ask whether this package is a suitable
+        // subject for the repair; this asks whether the file on disk is intact at all, and a
+        // half-written package has no business being judged on its suitability first.
+        int recovery = RecoverIfNeeded(
+            path, null, new Progress(Console.Out, verbose: false,
+                                     isTty: !Console.IsOutputRedirected, totalStages: 1));
+        if (recovery >= 0)
+            return recovery;
+
         var regions = PackageRegions.Load(path);
         var table = CntEntryTable.Parse(regions.Cnt, passcode);
         string contentId = CntHeader.ReadContentId(regions.Cnt);
