@@ -165,13 +165,13 @@ public class RepairJournalTests
     }
 
     [Fact]
-    public void PathForHonoursTempDir()
+    public void PathForHonoursWorkDir()
     {
         // Beside the package: named after it, nothing else — the directory already pairs them.
         Assert.Equal(Path.Combine("/pkgs", "a.pkg" + RepairJournal.Suffix),
                      RepairJournal.PathFor("/pkgs/a.pkg", null));
 
-        // Under --temp-dir: in that directory, still recognisable by name, plus a disambiguator.
+        // Under --work-dir: in that directory, still recognisable by name, plus a disambiguator.
         var temp = RepairJournal.PathFor("/pkgs/a.pkg", "/tmp/x");
         Assert.Equal("/tmp/x", Path.GetDirectoryName(temp));
         Assert.StartsWith("a.pkg.", Path.GetFileName(temp));
@@ -179,7 +179,7 @@ public class RepairJournalTests
     }
 
     [Fact]
-    public void PathForSeparatesSameNamedPackagesUnderOneTempDir()
+    public void PathForSeparatesSameNamedPackagesUnderOneWorkDir()
     {
         // Two packages with the same name in different directories must not share a journal:
         // whichever repair started second would overwrite the first's recovery data, and an

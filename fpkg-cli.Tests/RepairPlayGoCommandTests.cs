@@ -95,12 +95,12 @@ public class RepairPlayGoCommandTests
     }
 
     /// <summary>
-    /// A --temp-dir that names an existing FILE is a typo. Directory.CreateDirectory would throw an
+    /// A --work-dir that names an existing FILE is a typo. Directory.CreateDirectory would throw an
     /// IOException naming neither the flag nor the intent, so this refuses first and says which.
     /// (Where the journal actually lands is RepairJournal.PathFor's own test's business.)
     /// </summary>
     [Fact]
-    public void TempDirPointingAtAFileRefusesCleanly()
+    public void WorkDirPointingAtAFileRefusesCleanly()
     {
         var file = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         File.WriteAllText(file, "not a directory");
@@ -110,69 +110,69 @@ public class RepairPlayGoCommandTests
         {
             Console.SetError(captured);
             Assert.NotEqual(0, RepairPlayGoCommand.Run(
-                ["repair-playgo", "nonexistent.pkg", "--temp-dir", file]));
+                ["repair-playgo", "nonexistent.pkg", "--work-dir", file]));
         }
         finally { Console.SetError(previous); File.Delete(file); }
 
-        Assert.Contains("--temp-dir", captured.ToString());
+        Assert.Contains("--work-dir", captured.ToString());
         Assert.Contains("existing file", captured.ToString());
         // And it refused rather than replacing the file with a directory.
         Assert.False(Directory.Exists(file));
     }
 
     /// <summary>
-    /// A run that refuses before it starts must leave NOTHING behind — including the --temp-dir it
-    /// would otherwise have created. A flag that only relocates a temporary file has no business
-    /// leaving a permanent directory on a run that never began.
+    /// A run that refuses before it starts must leave NOTHING behind — including the --work-dir it
+    /// would otherwise have created. A flag that only relocates the journal or staging file has no
+    /// business leaving a permanent directory on a run that never began.
     /// </summary>
     [Fact]
-    public void ARefusedRunDoesNotLeaveItsTempDirBehind()
+    public void ARefusedRunDoesNotLeaveItsWorkDirBehind()
     {
         var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         try
         {
             Assert.NotEqual(0, RepairPlayGoCommand.Run(
-                ["repair-playgo", "nonexistent.pkg", "--temp-dir", dir]));
+                ["repair-playgo", "nonexistent.pkg", "--work-dir", dir]));
             Assert.False(Directory.Exists(dir),
-                         "a run that refused on its package still created its --temp-dir");
+                         "a run that refused on its package still created its --work-dir");
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 
     /// <summary>
-    /// The dry run reaches no writer, so nothing ever lands in --temp-dir — but the directory is
+    /// The dry run reaches no writer, so nothing ever lands in --work-dir — but the directory is
     /// still created, which is what proves the flag was honoured rather than ignored.
     /// </summary>
     [SkippableFact]
-    public void TempDirIsCreatedWhenItDoesNotExist()
+    public void WorkDirIsCreatedWhenItDoesNotExist()
     {
         Skip.IfNot(TestPackage.Exists, "test package not present");
         var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         try
         {
             Assert.Equal(0, RepairPlayGoCommand.Run(
-                ["repair-playgo", TestPackage.Path, "--temp-dir", dir]));
+                ["repair-playgo", TestPackage.Path, "--work-dir", dir]));
             Assert.True(Directory.Exists(dir));
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 
     [Fact]
-    public void TempDirWithoutAPathIsRefused()
+    public void WorkDirWithoutAPathIsRefused()
     {
         var previous = Console.Error;
         var captured = new StringWriter();
         try
         {
             Console.SetError(captured);
-            // A bare --temp-dir parses to a null value, which must be refused BY NAME rather than
+            // A bare --work-dir parses to a null value, which must be refused BY NAME rather than
             // silently falling through to the default placement.
             Assert.NotEqual(0, RepairPlayGoCommand.Run(
-                ["repair-playgo", "nonexistent.pkg", "--temp-dir"]));
+                ["repair-playgo", "nonexistent.pkg", "--work-dir"]));
         }
         finally { Console.SetError(previous); }
 
-        Assert.Contains("--temp-dir needs a path", captured.ToString());
+        Assert.Contains("--work-dir needs a path", captured.ToString());
     }
 
     [SkippableFact]

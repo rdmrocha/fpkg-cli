@@ -47,7 +47,7 @@ internal static class RepairPlayGoCommand
 
     /// <summary>Compared OrdinalIgnoreCase, matching how <c>Program.ParseFlags</c> keys them.</summary>
     private static readonly HashSet<string> KnownFlags =
-        new(["passcode", "out", "in-place", "dry-run", "temp-dir", "verbose"],
+        new(["passcode", "out", "in-place", "dry-run", "work-dir", "verbose"],
             StringComparer.OrdinalIgnoreCase);
 
     internal static int Run(string[] args)
@@ -64,7 +64,7 @@ internal static class RepairPlayGoCommand
         string? outPath = flags.GetValueOrDefault("out");
         bool inPlace = flags.ContainsKey("in-place");
         bool dryRunRequested = flags.ContainsKey("dry-run");
-        string? tempDir = flags.GetValueOrDefault("temp-dir");
+        string? workDir = flags.GetValueOrDefault("work-dir");
         bool verbose = flags.ContainsKey("verbose");
 
         // ParseFlags keys OrdinalIgnoreCase, so this must too: an ordinal comparison here would
@@ -81,16 +81,16 @@ internal static class RepairPlayGoCommand
             return Program.Fail("--out needs a path");
         if (dryRunRequested && (inPlace || outPath is not null))
             return Program.Fail("--dry-run cannot be combined with --out or --in-place");
-        if (flags.ContainsKey("temp-dir") && string.IsNullOrWhiteSpace(tempDir))
-            return Program.Fail("--temp-dir needs a path");
-        if (tempDir is not null)
+        if (flags.ContainsKey("work-dir") && string.IsNullOrWhiteSpace(workDir))
+            return Program.Fail("--work-dir needs a path");
+        if (workDir is not null)
         {
-            tempDir = Path.GetFullPath(tempDir);
+            workDir = Path.GetFullPath(workDir);
             // A path that already exists as a FILE is a typo, not a directory to create:
             // CreateDirectory would throw an IOException naming neither the flag nor the intent.
-            if (File.Exists(tempDir))
+            if (File.Exists(workDir))
                 return Program.Fail(
-                    $"--temp-dir '{tempDir}' is an existing file, not a directory.");
+                    $"--work-dir '{workDir}' is an existing file, not a directory.");
         }
         if (!File.Exists(path))
             return Program.Fail($"no such file: {path}");
@@ -105,25 +105,25 @@ internal static class RepairPlayGoCommand
 
         // CREATED LAST, after every argument and package check above has passed. Creating it with
         // the other flag validation was tidier to read and left an empty directory behind on every
-        // run that then refused — a flag that only relocates a temporary file has no business
-        // leaving a permanent trace when the run never starts.
-        if (tempDir is not null)
+        // run that then refused — a flag that only relocates the journal or staging file has no
+        // business leaving a permanent trace when the run never starts.
+        if (workDir is not null)
         {
-            try { Directory.CreateDirectory(tempDir); }
+            try { Directory.CreateDirectory(workDir); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
                                           or ArgumentException or NotSupportedException)
             {
-                return Program.Fail($"--temp-dir '{tempDir}' could not be created: {ex.Message}");
+                return Program.Fail($"--work-dir '{workDir}' could not be created: {ex.Message}");
             }
         }
 
-        if (tempDir is not null && outPath is not null)
-            WarnIfTempDirIsOnAnotherDevice(tempDir, Path.GetFullPath(outPath));
+        if (workDir is not null && outPath is not null)
+            WarnIfWorkDirIsOnAnotherDevice(workDir, Path.GetFullPath(outPath));
 
         try
         {
             return Repair(path, passcode, write ? (inPlace ? path : outPath!) : null, inPlace,
-                          tempDir, verbose);
+                          workDir, verbose);
         }
         // KeyNotFoundException and UnauthorizedAccessException are BACKSTOPS, not the design: the
         // lookups that could raise the first now route through CntEntryTable.Get and
@@ -139,7 +139,7 @@ internal static class RepairPlayGoCommand
     }
 
     /// <summary>
-    /// Warns — never refuses — when <c>--temp-dir</c> and <c>--out</c> look like they land on
+    /// Warns — never refuses — when <c>--work-dir</c> and <c>--out</c> look like they land on
     /// different filesystems. The staging file exists so that the target appears atomically, by
     /// <see cref="File.Move(string,string,bool)"/> being a rename within one filesystem. Across
     /// devices that call degrades into a copy-then-delete, so a crash can leave a PARTIAL file at
@@ -154,16 +154,16 @@ internal static class RepairPlayGoCommand
     /// answer warns rather than staying silent, and the wording never claims certainty.
     /// </para>
     /// </summary>
-    private static void WarnIfTempDirIsOnAnotherDevice(string tempDir, string outPath)
+    private static void WarnIfWorkDirIsOnAnotherDevice(string workDir, string outPath)
     {
-        string? tempMount = MountPointOf(tempDir);
+        string? tempMount = MountPointOf(workDir);
         string? outMount = MountPointOf(Path.GetDirectoryName(outPath) ?? ".");
         if (tempMount is not null && outMount is not null &&
             string.Equals(tempMount, outMount, StringComparison.Ordinal))
             return;
 
         Console.Error.WriteLine(
-            "warning: --temp-dir may be on a different filesystem than --out. If it is, the final " +
+            "warning: --work-dir may be on a different filesystem than --out. If it is, the final " +
             "File.Move is a non-atomic copy rather than a rename, so an interruption can leave a " +
             "partial file at the output path. (Best effort: this cannot be determined reliably on " +
             "this platform.)");
@@ -221,10 +221,10 @@ internal static class RepairPlayGoCommand
     /// and exits non-zero without touching the package or the journal.
     /// </para>
     /// </summary>
-    internal static int RecoverIfNeeded(string target, string? tempDir, Progress progress,
+    internal static int RecoverIfNeeded(string target, string? workDir, Progress progress,
                                         bool dryRun = false)
     {
-        string journalPath = RepairJournal.PathFor(target, tempDir);
+        string journalPath = RepairJournal.PathFor(target, workDir);
         var journal = RepairJournal.TryRead(journalPath);
         // Absent, foreign, truncated or torn: nothing this can safely undo. A file that is present
         // but unreadable is deliberately NOT deleted here — it is not ours to destroy, and
@@ -337,7 +337,7 @@ internal static class RepairPlayGoCommand
     private const int RecoveryStages = 1;
 
     private static int Repair(string path, string passcode, string? target, bool inPlace,
-                              string? tempDir = null, bool verbose = false)
+                              string? workDir = null, bool verbose = false)
     {
         // BEFORE every guard, deliberately. The guards ask whether this package is a suitable
         // subject for the repair; this asks whether the file on disk is intact at all, and a
@@ -346,7 +346,7 @@ internal static class RepairPlayGoCommand
 
         // target is null exactly when this is a dry run, which is also how the stage count below is
         // chosen — the two must not disagree about the mode.
-        int recovery = RecoverIfNeeded(path, tempDir,
+        int recovery = RecoverIfNeeded(path, workDir,
                                        new Progress(Console.Out, verbose, isTty, RecoveryStages),
                                        dryRun: target is null);
         if (recovery >= 0)
@@ -483,9 +483,9 @@ internal static class RepairPlayGoCommand
         // beside it and leaving no temporary file; --out stages into a temporary and renames.
         if (inPlace)
             InPlaceWriter.Write(regions, repaired, contentId, target,
-                                RepairJournal.PathFor(target, tempDir), progress);
+                                RepairJournal.PathFor(target, workDir), progress);
         else
-            WriteRepaired(regions, repaired, contentId, target, tempDir: tempDir,
+            WriteRepaired(regions, repaired, contentId, target, workDir: workDir,
                           progress: progress);
         progress.Finish();
         Console.WriteLine();
@@ -685,14 +685,14 @@ internal static class RepairPlayGoCommand
     /// </summary>
     private static void WriteRepaired(PackageRegions regions, CntRepairResult repaired,
                                       string contentId, string target,
-                                      string? tempDir, Progress progress)
+                                      string? workDir, Progress progress)
     {
         // The staging file sits beside the target by default, so that File.Move is a rename within
-        // one filesystem. --temp-dir moves it elsewhere on the user's say-so; Run has already
+        // one filesystem. --work-dir moves it elsewhere on the user's say-so; Run has already
         // created that directory and warned about the rename it may weaken.
         string directory = Path.GetDirectoryName(Path.GetFullPath(target)) ?? ".";
         Directory.CreateDirectory(directory);
-        string tmp = Path.Combine(tempDir ?? directory,
+        string tmp = Path.Combine(workDir ?? directory,
                                   Path.GetFileName(target) + ".repair-playgo.tmp");
 
         try

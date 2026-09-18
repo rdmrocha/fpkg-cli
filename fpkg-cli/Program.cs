@@ -110,7 +110,7 @@ internal static class Program
                                         rewrites a 0.6.8-built package's PlayGo metadata to the
                                         0.6.9 shape without touching the payload. Reports and
                                         writes nothing unless --out or --in-place is given.
-                          --temp-dir <dir>  where the journal (--in-place) or the staging
+                          --work-dir <dir>  where the journal (--in-place) or the staging
                                             file (--out) is written; defaults to beside the
                                             target. A different device makes --out's final
                                             rename a non-atomic copy.

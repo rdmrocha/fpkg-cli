@@ -51,21 +51,21 @@ internal sealed record RepairJournal(
     /// </para>
     ///
     /// <para>
-    /// Under <paramref name="tempDir"/>, every package's journal lands in one shared directory, so
+    /// Under <paramref name="workDir"/>, every package's journal lands in one shared directory, so
     /// the name alone is not unique: two packages both called <c>game.pkg</c> in different
     /// directories would collide, and the second repair would silently overwrite the first's
     /// journal — losing the first's recovery data outright if it were interrupted. The name
     /// therefore carries a short digest of the target's full path to keep them apart.
     /// </para>
     /// </summary>
-    internal static string PathFor(string target, string? tempDir)
+    internal static string PathFor(string target, string? workDir)
     {
-        if (string.IsNullOrEmpty(tempDir))
+        if (string.IsNullOrEmpty(workDir))
             return Path.Combine(Path.GetDirectoryName(target) ?? ".",
                                 Path.GetFileName(target) + Suffix);
 
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(target)));
-        return Path.Combine(tempDir,
+        return Path.Combine(workDir,
                             $"{Path.GetFileName(target)}.{Convert.ToHexString(digest)[..16].ToLowerInvariant()}{Suffix}");
     }
 

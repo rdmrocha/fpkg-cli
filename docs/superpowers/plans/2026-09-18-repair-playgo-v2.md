@@ -1,4 +1,4 @@
-# `fpkg repair-playgo` v2 — journalled in-place writes, `--temp-dir`, staged progress
+# `fpkg repair-playgo` v2 — journalled in-place writes, `--work-dir`, staged progress
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -53,7 +53,7 @@ Modified:
 
 | file | change |
 |---|---|
-| `RepairPlayGoCommand.cs` | `--temp-dir`, `--verbose`; journal recovery; route `--in-place` to `InPlaceWriter`; progress through every stage |
+| `RepairPlayGoCommand.cs` | `--work-dir`, `--verbose`; journal recovery; route `--in-place` to `InPlaceWriter`; progress through every stage |
 | `PackageRegions.cs` | `WriteTo` takes an optional progress callback |
 | `CntReseal.cs` | `Seal` takes an optional progress callback (the body digest is 63 MB) |
 | `SiRepair.cs` | `Rebuild` forwards a progress callback to `BuildChunkCrc` |
@@ -185,7 +185,7 @@ git commit -m "feat: staged progress reporting with throttled percentages"
       long TargetLength, long CntOffset, long CntLength, long SiLength, byte[] Identity)
   {
       internal const string Suffix = ".repair-playgo.journal";
-      internal static string PathFor(string target, string? tempDir);
+      internal static string PathFor(string target, string? workDir);
       /// <summary>SHA-256 of file[0, 65536) — the FIH block, which the repair never touches.</summary>
       internal static byte[] ComputeIdentity(string packagePath);
       /// <summary>Writes and FLUSHES TO DISK. Returns when the journal is durable.</summary>
@@ -292,7 +292,7 @@ public class RepairJournalTests
     }
 
     [Fact]
-    public void PathForHonoursTempDir()
+    public void PathForHonoursWorkDir()
     {
         Assert.Equal(Path.Combine("/tmp/x", "a.pkg" + RepairJournal.Suffix),
                      RepairJournal.PathFor("/pkgs/a.pkg", "/tmp/x"));
@@ -439,7 +439,7 @@ git commit -m "feat: write the repair in place, journalled, without staging the 
 
 **Interfaces:**
 - Consumes: `RepairJournal`.
-- Produces: `internal static int RecoverIfNeeded(string target, string? tempDir, Progress progress)` — returns `0` when a journal was found and restored (caller exits), `-1` when there was nothing to do.
+- Produces: `internal static int RecoverIfNeeded(string target, string? workDir, Progress progress)` — returns `0` when a journal was found and restored (caller exits), `-1` when there was nothing to do.
 
 Behaviour: if a journal exists for the target, restore it, print plainly what happened — that a previous run was interrupted, that the package has been restored to its pre-repair state, and that the repair can be re-run — and exit 0 **without** attempting the repair. Restoring and then immediately retrying would hide the interruption and, if the cause was a bug, repeat it.
 
@@ -499,7 +499,7 @@ git commit -m "feat: restore an interrupted in-place repair from its journal"
 
 ---
 
-### Task 5: `--temp-dir`, `--verbose`, and the progress wiring
+### Task 5: `--work-dir`, `--verbose`, and the progress wiring
 
 **Files:**
 - Modify: `fpkg-cli/RepairPlayGo/RepairPlayGoCommand.cs`, `fpkg-cli/RepairPlayGo/PackageRegions.cs`, `fpkg-cli/RepairPlayGo/CntReseal.cs`, `fpkg-cli/Program.cs` (usage)
@@ -509,7 +509,7 @@ git commit -m "feat: restore an interrupted in-place repair from its journal"
 - `PackageRegions.WriteTo(string outputPath, byte[] cnt, byte[] si, bool flushToDisk = true, Progress? progress = null)`
 - `CntReseal.Seal(byte[] cnt, IReadOnlyList<CntEntry> physical, string contentId, string passcode, Progress? progress = null)`
 
-`--temp-dir <path>` relocates the journal (`--in-place`) and the staging file (`--out`). Create it if absent. **When it resolves to a different device than an `--out` target, warn**: `File.Move` stops being a rename and becomes a non-atomic copy, so the staging file's whole purpose is weakened. Detect by comparing `new DriveInfo(...).Name`, or on Unix by `stat` device id via `File.GetAttributes`-adjacent means; if the platform makes this unreliable, warn unconditionally when `--temp-dir` is given with `--out` and say the check is best-effort. Do not refuse — the user asked for it.
+`--work-dir <path>` relocates the journal (`--in-place`) and the staging file (`--out`). Create it if absent. **When it resolves to a different device than an `--out` target, warn**: `File.Move` stops being a rename and becomes a non-atomic copy, so the staging file's whole purpose is weakened. Detect by comparing `new DriveInfo(...).Name`, or on Unix by `stat` device id via `File.GetAttributes`-adjacent means; if the platform makes this unreliable, warn unconditionally when `--work-dir` is given with `--out` and say the check is best-effort. Do not refuse — the user asked for it.
 
 **The stages, in order** (`Progress` is constructed with the right count for the mode):
 
@@ -554,13 +554,13 @@ git commit -m "feat: restore an interrupted in-place repair from its journal"
     }
 
     [Fact]
-    public void TempDirIsCreatedWhenMissing()
+    public void WorkDirIsCreatedWhenMissing()
     {
         var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         try
         {
             Assert.NotEqual(0, RepairPlayGoCommand.Run(
-                ["repair-playgo", "nonexistent.pkg", "--temp-dir", dir]));   // fails on the package, not the dir
+                ["repair-playgo", "nonexistent.pkg", "--work-dir", dir]));   // fails on the package, not the dir
             Assert.True(Directory.Exists(dir) || !File.Exists("nonexistent.pkg"));
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
@@ -572,14 +572,14 @@ Add a `CaptureRun(string[] args)` helper to that test class that redirects `Cons
 - [ ] **Step 2: Run it to verify it fails**
 
 Run: `dotnet test fpkg-cli.Tests/fpkg.Tests.csproj --filter RepairPlayGoCommand`
-Expected: FAIL — no `reading package` line, no `--verbose`, no `--temp-dir`.
+Expected: FAIL — no `reading package` line, no `--verbose`, no `--work-dir`.
 
 - [ ] **Step 3: Thread `Progress` through `Repair`, `WriteTo`, `Seal` and `SiRepair.Rebuild`; add the two flags and the usage text**
 
 Add to `Program.Usage()` beside the existing `repair-playgo` line:
 
 ```
-                          --temp-dir <dir>  where the journal (--in-place) or the staging
+                          --work-dir <dir>  where the journal (--in-place) or the staging
                                             file (--out) is written; defaults to beside the
                                             target. A different device makes --out's final
                                             rename a non-atomic copy.
@@ -605,7 +605,7 @@ Expected: `Package:` appears immediately, stages are numbered, no stage runs sil
 
 ```bash
 git add fpkg-cli/RepairPlayGo fpkg-cli/Program.cs fpkg-cli.Tests/RepairPlayGoCommandTests.cs
-git commit -m "feat: add --temp-dir and --verbose, and report progress per stage"
+git commit -m "feat: add --work-dir and --verbose, and report progress per stage"
 ```
 
 ---
@@ -679,13 +679,13 @@ A new subsection covering: the two invariants that make in-place possible (paylo
 
 - [ ] **Step 2: Update `CHANGELOG.md` and `dist/README.md`**
 
-Cover `--in-place` being genuinely in-place and recoverable, `--temp-dir` with its cross-device caveat for `--out`, `--verbose`, and the staged progress output.
+Cover `--in-place` being genuinely in-place and recoverable, `--work-dir` with its cross-device caveat for `--out`, `--verbose`, and the staged progress output.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add docs/repair-playgo-spec.md CHANGELOG.md dist/README.md
-git commit -m "docs: document journalled in-place writes, --temp-dir and --verbose"
+git commit -m "docs: document journalled in-place writes, --work-dir and --verbose"
 ```
 
 ---

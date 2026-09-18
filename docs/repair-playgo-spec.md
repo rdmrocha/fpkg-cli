@@ -255,7 +255,7 @@ Until that fallback exists, a package whose growth exceeds its slack must make `
 
 ```
 fpkg repair-playgo <pkg> [--passcode <32>] [--out <path>] [--in-place] [--dry-run]
-                          [--temp-dir <dir>] [--verbose]
+                          [--work-dir <dir>] [--verbose]
 ```
 `--dry-run` is the default: report the recovered values, the new entry sizes, the slack, and every digest that would change, writing nothing.
 
@@ -298,7 +298,7 @@ Measured on the test package: CNT region offset 596,770,816, size 63,569,920 (in
 ### The journal
 
 A sidecar file, `<package>.repair-playgo.journal` beside the target by default (or under
-`--temp-dir`), holding the two regions the write is about to overwrite:
+`--work-dir`), holding the two regions the write is about to overwrite:
 
 ```
  0   8   magic "FPKGJRN1"
