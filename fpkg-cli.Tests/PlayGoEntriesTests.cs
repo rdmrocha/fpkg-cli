@@ -37,4 +37,30 @@ public class PlayGoEntriesTests
         Assert.Equal(0x23920000ul, info.CoveredBytes);
         Assert.Equal(23,  info.FileCount);
     }
+
+    /// <summary>
+    /// A minimal, self-contained PlayGoRecovery that needs no test package: a single chunk,
+    /// single scenario, and a 36-character content id (the only shape BuildMultiChunkDat checks
+    /// on it). Used only to reach PlayGoEntries.Build's FICM handling without the real package.
+    /// </summary>
+    private static PlayGoRecovery MinimalRecovery() => new(
+        ChunkCount: 1, ScenarioCount: 1, DefaultScenarioId: 0, DefaultLanguageId: 1,
+        ExtentCount: 1, LanguageMask: ulong.MaxValue, ContentId: new string('A', 36),
+        TotalSize: 100, DataSize: 100, TailSize: 0, ScenarioLabels: ["Scenario #0"]);
+
+    [Fact]
+    public void FicmShorterThanTheHeaderThrows()
+    {
+        // No package needed: this guard fires before anything package-specific matters.
+        var tooShort = new byte[10];
+        Assert.Throws<InvalidDataException>(() => PlayGoEntries.Build(MinimalRecovery(), tooShort));
+    }
+
+    [Fact]
+    public void FicmWithAPartialTrailingFileEntryThrows()
+    {
+        // 16-byte header plus one odd trailing byte: not a whole number of 2-byte file entries.
+        var odd = new byte[17];
+        Assert.Throws<InvalidDataException>(() => PlayGoEntries.Build(MinimalRecovery(), odd));
+    }
 }

@@ -1,3 +1,4 @@
+using System.Reflection;
 using LibProsperoPkg.PlayGo;
 
 namespace Fpkg.Cli.RepairPlayGo;
@@ -43,48 +44,66 @@ internal sealed record PlayGoEntries(byte[] ChunkDat, byte[] Ficm, byte[] Scenar
     /// </summary>
     private static byte[] ZeroChunkIds(byte[] originalFicm)
     {
+        if (originalFicm.Length < FicmHeaderSize)
+            throw new InvalidDataException(
+                $"playgo-ficm.dat is too small: {originalFicm.Length} bytes, need at least " +
+                $"{FicmHeaderSize} for its header.");
+        if ((originalFicm.Length - FicmHeaderSize) % FicmBytesPerFile != 0)
+            throw new InvalidDataException(
+                $"playgo-ficm.dat's file table ({originalFicm.Length - FicmHeaderSize} bytes after " +
+                $"the header) is not a whole number of {FicmBytesPerFile}-byte per-file entries.");
+
         var copy = (byte[])originalFicm.Clone();
         for (int at = FicmHeaderSize; at < copy.Length; at += FicmBytesPerFile)
             copy[at] = 0;
         return copy;
     }
 
-    // BuildLanguageChunkLayout is public but returns the internal nested record
-    // ProsperoPlayGo.LanguageChunkLayout, which C# cannot name. This is the only reflection in
-    // the feature, and it is over a public method whose return type happens to be internal.
+    /// <summary>
+    /// BuildLanguageChunkLayout is public but returns the internal nested record
+    /// ProsperoPlayGo.LanguageChunkLayout, which C# cannot name. This is the only reflection in
+    /// the feature, and it is over a public method whose return type happens to be internal.
+    /// Every shape assumption below is checked explicitly and fails with a message telling a
+    /// future maintainer what to actually do, rather than a bare reflection exception.
+    /// </summary>
     private static (IReadOnlyList<ulong> Main, IReadOnlyList<ulong> Masks)
         Layout(ulong dataSize, int chunkCount, ulong languageMask)
     {
-        var m = typeof(ProsperoPlayGo).Assembly
-            .GetType("LibProsperoPkg.PlayGo.ProsperoPlayGo")!
-            .GetMethod("BuildLanguageChunkLayout", [typeof(ulong), typeof(int), typeof(ulong)])
-            ?? throw new InvalidOperationException(
-                "ProsperoPlayGo.BuildLanguageChunkLayout(ulong,int,ulong) not found. The shipped " +
-                "LibProsperoPkg has changed; re-derive repair-playgo against it before shipping.");
-        var layout = m.Invoke(null, [dataSize, chunkCount, languageMask])
-            ?? throw new InvalidOperationException(
-                "ProsperoPlayGo.BuildLanguageChunkLayout returned null. The shipped " +
-                "LibProsperoPkg has changed; re-derive repair-playgo against it before shipping.");
-        var t = layout.GetType();
+        // ProsperoPlayGo is itself a compile-time-visible public type, so it is named directly —
+        // no string-based Assembly.GetType lookup. If it ever disappeared upstream, this file
+        // would fail to compile, which is a better failure than any runtime check could give.
+        var method = typeof(ProsperoPlayGo).GetMethod(
+            "BuildLanguageChunkLayout", [typeof(ulong), typeof(int), typeof(ulong)]);
+        Expect(method is { IsStatic: true },
+            "ProsperoPlayGo.BuildLanguageChunkLayout(ulong,int,ulong) exists as a public static method");
 
-        var mainProp = t.GetProperty("MainChunkSizes")
-            ?? throw new InvalidOperationException(
-                "ProsperoPlayGo.LanguageChunkLayout.MainChunkSizes not found. The shipped " +
-                "LibProsperoPkg has changed; re-derive repair-playgo against it before shipping.");
-        var masksProp = t.GetProperty("ChunkLanguageMasks")
-            ?? throw new InvalidOperationException(
-                "ProsperoPlayGo.LanguageChunkLayout.ChunkLanguageMasks not found. The shipped " +
-                "LibProsperoPkg has changed; re-derive repair-playgo against it before shipping.");
+        var layout = method!.Invoke(null, [dataSize, chunkCount, languageMask]);
+        Expect(layout is not null, "BuildLanguageChunkLayout returned a non-null LanguageChunkLayout");
 
-        var main = mainProp.GetValue(layout) as IReadOnlyList<ulong>
-            ?? throw new InvalidOperationException(
-                "ProsperoPlayGo.LanguageChunkLayout.MainChunkSizes is not an IReadOnlyList<ulong>. " +
-                "The shipped LibProsperoPkg has changed; re-derive repair-playgo against it before shipping.");
-        var masks = masksProp.GetValue(layout) as IReadOnlyList<ulong>
-            ?? throw new InvalidOperationException(
-                "ProsperoPlayGo.LanguageChunkLayout.ChunkLanguageMasks is not an IReadOnlyList<ulong>. " +
-                "The shipped LibProsperoPkg has changed; re-derive repair-playgo against it before shipping.");
+        var type = layout!.GetType();
+        var mainProp = type.GetProperty("MainChunkSizes");
+        Expect(IsInstanceReadOnlyListOfUlong(mainProp),
+            "LanguageChunkLayout.MainChunkSizes exists as an instance IReadOnlyList<ulong> property");
 
+        var masksProp = type.GetProperty("ChunkLanguageMasks");
+        Expect(IsInstanceReadOnlyListOfUlong(masksProp),
+            "LanguageChunkLayout.ChunkLanguageMasks exists as an instance IReadOnlyList<ulong> property");
+
+        var main = (IReadOnlyList<ulong>)mainProp!.GetValue(layout)!;
+        var masks = (IReadOnlyList<ulong>)masksProp!.GetValue(layout)!;
         return (main, masks);
+    }
+
+    private static bool IsInstanceReadOnlyListOfUlong(PropertyInfo? property) =>
+        property is { PropertyType: var t } &&
+        t == typeof(IReadOnlyList<ulong>) &&
+        property.GetMethod is { IsStatic: false };
+
+    private static void Expect(bool ok, string what)
+    {
+        if (!ok)
+            throw new InvalidOperationException(
+                $"shape check failed: {what}. The shipped LibProsperoPkg has changed; re-derive " +
+                "repair-playgo against it before shipping.");
     }
 }
