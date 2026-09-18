@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using Fpkg.Cli.RepairPlayGo;
 using Xunit;
 
@@ -15,12 +14,10 @@ public class PackageRegionsTests
         Assert.Equal(63_569_920, r.Cnt.Length);
         Assert.Equal(665_774, r.Si.Length);
 
-        // No padding past the body — Task 10's CRC length rule depends on this. CntHeader
-        // (Task 3) doesn't exist yet, so these are read inline: big-endian body_offset at +32
-        // and body_size at +40 in the CNT header. Task 3 will give these names.
+        // No padding past the body — Task 10's CRC length rule depends on this.
         Assert.Equal((long)r.Cnt.Length,
-            (long)BinaryPrimitives.ReadUInt64BigEndian(r.Cnt.AsSpan(32))    // body_offset
-          + (long)BinaryPrimitives.ReadUInt64BigEndian(r.Cnt.AsSpan(40))); // body_size
+            (long)CntHeader.U64(r.Cnt, CntHeader.BodyOffset)
+          + (long)CntHeader.U64(r.Cnt, CntHeader.BodySize));
     }
 
     [SkippableFact]
