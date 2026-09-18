@@ -6,6 +6,10 @@ public class SiRepairTests
 {
     private static readonly string Passcode = new string('0', 32);
 
+    /// <summary>The CRC pass's log lines are not under test here; discard them.</summary>
+    private static Progress Silent =>
+        new(TextWriter.Null, verbose: false, isTty: false, totalStages: 1);
+
     /// <summary>
     /// FIXED POINT for the SI: rebuilding the zip from its own members, with the ORIGINAL
     /// chunk.dat and the ORIGINAL mount image, must reproduce it byte for byte. This proves
@@ -22,7 +26,7 @@ public class SiRepairTests
         using var mount = File.OpenRead(TestPackage.Path);
         var got = SiRepair.Rebuild(r.Si, TestPackage.ContentId,
                                    members["common/etc/playgo-chunk.dat"],
-                                   mount, r.CntOffset + r.Cnt.Length);
+                                   mount, r.CntOffset + r.Cnt.Length, Silent);
         Bytes.AssertEqual(r.Si, got);
     }
 
@@ -67,7 +71,7 @@ public class SiRepairTests
             orig.WriteTo(tmp, repaired.Cnt, []);
             using var mount = File.OpenRead(tmp);
             var got = SiRepair.Rebuild(orig.Si, TestPackage.ContentId, repaired.NewChunkDat,
-                                       mount, orig.CntOffset + repaired.Cnt.Length);
+                                       mount, orig.CntOffset + repaired.Cnt.Length, Silent);
 
             // Localise before comparing the whole zip: entry count first, then the prefix the
             // spec says cannot move, then everything.

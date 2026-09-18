@@ -66,8 +66,13 @@ internal static class SiRepair
     /// block is reduced over a PARTIAL read of whatever remains, so an incorrect length changes the
     /// last entry's VALUE as well as the entry count.
     /// </param>
+    /// <param name="progress">
+    /// Receives the CRC pass's own log lines. That reduction walks the entire mount image, so on a
+    /// 661 MB package it is the longest single step of the repair; without this it is silent.
+    /// </param>
     internal static byte[] Rebuild(byte[] si, string contentId, byte[] newChunkDat,
-                                   Stream repairedMountImage, long mountImageLength)
+                                   Stream repairedMountImage, long mountImageLength,
+                                   Progress progress)
     {
         var members = ReadMembers(si);
 
@@ -93,7 +98,8 @@ internal static class SiRepair
             : throw new InvalidDataException($"the SI segment is missing '{NapsMeta18Path}'");
 
         byte[] playGoChunkCrc =
-            ProsperoPlayGo.BuildChunkCrc(repairedMountImage, mountImageLength);
+            ProsperoPlayGo.BuildChunkCrc(repairedMountImage, mountImageLength,
+                                         CancellationToken.None, line => progress.Detail(line));
 
         var rebuilt = ProsperoSiArchive.BuildMembers(
             contentId,

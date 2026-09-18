@@ -391,8 +391,12 @@ internal static class RepairPlayGoCommand
 
             byte[] newSi;
             using (var mount = File.OpenRead(tmp))
+                // The staged path has no Progress threaded through it yet, so the CRC pass stays
+                // silent here exactly as it was before; wiring it up belongs to the CLI task.
                 newSi = SiRepair.Rebuild(regions.Si, contentId, repaired.NewChunkDat,
-                                         mount, regions.CntOffset + repaired.Cnt.Length);
+                                         mount, regions.CntOffset + repaired.Cnt.Length,
+                                         new Progress(TextWriter.Null, verbose: false,
+                                                      isTty: false, totalStages: 1));
 
             regions.WriteTo(tmp, repaired.Cnt, newSi);
             CopyFileMode(regions.SourcePath, tmp);
