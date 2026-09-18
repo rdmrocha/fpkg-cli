@@ -278,6 +278,25 @@ cp -R out/inner src/ && cp -R out/source/sce_sys/. src/sce_sys/
 ./fpkg build --source src --out oracle/
 ```
 
+**The oracle must be rebuilt with RAD Oodle, and the build must be patched for it.** That means a
+full `./fpkg patch` with a RAD library present in `fpkg-tools/native/` — `--ffpfsc` alone is not
+enough. Without it the build silently selects the BuiltIn Kraken encoder and produces an oracle
+roughly **6.4 MB larger** (measured: 667,365,986 bytes against 661,005,150, with `EmbeddedCntOffset`
+603,127,808 rather than 596,770,816). That oracle then fails gate 2 for a reason that has nothing to
+do with the repair.
+
+Two cheap ways to catch it before wasting a gate run:
+
+- The build log prints `kraken backend:`. It must say the Oodle encoder, not `BuiltIn`. The line
+  `kraken: Auto selected the BuiltIn encoder (no RAD Oodle library in fpkg-tools/native/...)` is the
+  failure, stated plainly, at the top of the log.
+- `AcceptanceTests`/`OracleTests` assert the oracle's outer PFS is byte-identical to the original
+  package's (`3b7702ffc695b125…`). A correctly built oracle reproduces the payload exactly, because
+  the repair never touches it — so a payload mismatch is an encoder mismatch, every time.
+
+A regenerated oracle whose three PlayGo entry sizes are 5376 / 62 / 2293 but whose total size differs
+is that mismatch, not a repair defect.
+
 `ValidateLayout` passing, `fpkg verify --full` passing and the `PlayGoInitialChunkProblem` warning
 disappearing are all worth having as fast feedback during development. **None of them is the gate.**
 Only the two byte-compares are.
