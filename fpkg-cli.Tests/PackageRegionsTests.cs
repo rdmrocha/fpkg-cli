@@ -36,4 +36,24 @@ public class PackageRegionsTests
         }
         finally { File.Delete(tmp); }
     }
+
+    /// <summary>
+    /// A CNT-only file is what Split's own cnt output is: ProsperoPkgReader.Read accepts it
+    /// (DetectType reports Meta) but leaves Fih null, so Load must refuse it with a clear
+    /// error rather than a NullReferenceException.
+    /// </summary>
+    [SkippableFact]
+    public void RefusesAPackageWithNoFihHeader()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var cnt = PackageRegions.Load(TestPackage.Path).Cnt;
+        var tmp = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        try
+        {
+            File.WriteAllBytes(tmp, cnt);
+            var ex = Assert.Throws<InvalidDataException>(() => PackageRegions.Load(tmp));
+            Assert.Contains("FIH", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { File.Delete(tmp); }
+    }
 }
