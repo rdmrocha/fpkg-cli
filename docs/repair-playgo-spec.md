@@ -1,6 +1,6 @@
 # `fpkg repair-playgo` — implementation spec
 
-Rewrites a package's PlayGo metadata in place, to the shape LibProsperoPkg 0.6.9 produces, without recompressing the payload. Target: seconds instead of hours, no extraction, no temp copy of the payload.
+Rewrites a package's PlayGo metadata in place, to the shape LibProsperoPkg 0.6.9 produces. The payload is never decoded, recompressed or modified — it is copied through verbatim — so the repair takes seconds instead of the hours a rebuild costs, and needs no extraction. It is not copy-free: the output is assembled in a temporary file beside the target and renamed over it, so it needs free space beside the target roughly equal to the package's own size. The write is two passes over that temp file (the SI's CRC covers the repaired mount image, so those bytes must exist before the SI can be built), which means one repair reads and writes the payload twice.
 
 Everything below marked PROVEN was measured on `Terminator.2D.NO.FATE.PPSA25872.v1.2.0000.pkg` (661,006,510 B, built with 0.6.8) against the same source rebuilt with 0.6.9.
 
@@ -167,8 +167,13 @@ CNT header field offsets, from `PkgWriter.WriteHeader`, all **big-endian**:
 | 28 | `main_ent_data_size` u32 | | 1040 | `pfs_image_offset` u64 |
 | 32 | `body_offset` u64 | | 1200 | `cnt_region_offset` u64 |
 | 40 | `body_size` u64 | | 1208 | `cnt_region_size` u64 |
-| 48 | `mandatory_size` u64 | | 1296 | `desc_image_key_offset/size`, `desc_mandatory_offset/size` u32 ×4 |
+| 48 | `mandatory_size` u64 — an OFFSET despite the name | | 1296 | `desc_image_key_offset/size`, `desc_mandatory_offset/size` u32 ×4 |
 | 116 | `content_type` u32 | | 1312 | `desc_digest` 64 B |
+
+**`mandatory_size` holds an offset, not a size.** Header[48] is IMAGEDIGS' (1034) `DataOffset`,
+which is what `PkgWriter.WriteHeader` stores and what `CntReseal` writes back. The name is the
+library's own field name and is kept for that reason; do not "correct" the value to the entry's
+size to match it, or fixed point 1 breaks.
 
 `mandatory_size`, `desc_mandatory_offset` and `desc_mandatory_size` all derive from the
 `IMAGEDIGS_DAT` (1034) meta entry, and `desc_image_key_offset/size` from `IMAGE_KEY` (32), so all

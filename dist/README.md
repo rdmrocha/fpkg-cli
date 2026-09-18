@@ -116,7 +116,21 @@ Keep the opt-outs in mind only if you know why you want them: with any of them o
 
 `--rebuild-source` and `template` read package entries only and never touch the inner filesystem, so they finish in seconds even on a large package.
 
-`verify` also warns when a package's files sit outside its scenario's initial PlayGo chunk set. That shape is structurally legal, so the library's own verifier accepts it, but PlayGo treats anything in a later chunk as not yet downloaded — so an installed package reports most of itself as missing. The warning does not change the exit code; rebuilding fixes it.
+`verify` also warns when a package's files sit outside its scenario's initial PlayGo chunk set. That shape is structurally legal, so the library's own verifier accepts it, but PlayGo treats anything in a later chunk as not yet downloaded — so an installed package reports most of itself as missing. The warning does not change the exit code; rebuilding fixes it, and so does `repair-playgo`.
+
+## Repairing a package's PlayGo metadata
+
+```sh
+./fpkg repair-playgo GAME.pkg           # dry run: says what it would change
+./fpkg repair-playgo GAME.pkg --out FIXED.pkg
+./fpkg repair-playgo GAME.pkg --in-place
+```
+
+Rewrites the PlayGo metadata of a package built with 0.6.8 — the one `verify` warns about above — to the shape 0.6.9 produces, in seconds. The payload is never decoded, recompressed or modified; it is copied through verbatim, so the result is byte-identical to a 0.6.9 rebuild of the same source without the rebuild. Add `--passcode` if the package's is not the default.
+
+A dry run is what you get unless you pass `--out` or `--in-place`. `--out` refuses to overwrite an existing file. `--in-place` writes beside the target and renames over it only after a complete, flushed write, so the original is never truncated first — either way you need free space beside the target roughly equal to the package's own size.
+
+It refuses rather than guessing: a passcode that does not match, a package that is not an Application volume or not the PS5 publisher key profile, a `playgo-scenario.json` carrying scenario names that regeneration cannot preserve, an SI segment carrying `pfsimage.xml` or missing entirely, and a relayout that would change the container's `body_size`. Every check runs before anything is written.
 
 A template is the `sce_sys` inputs plus a `.gp5` project carrying the content id, passcode, entitlement key and PlayGo counts recovered from the package. **The payload is not included** — copy your own data tree in beside it, then:
 
