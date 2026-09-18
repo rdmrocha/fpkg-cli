@@ -216,6 +216,16 @@ public class RepairPlayGoCommandTests
     /// --in-place must produce exactly what --out produces from the same input, and must not
     /// leave its temporary file behind. Run on a COPY: the real package is an input to every
     /// other test in this project.
+    ///
+    /// <para>
+    /// The digest and the absent .tmp do NOT on their own prove --in-place took the in-place path:
+    /// the staged writer renames its temporary onto the target, so an --in-place routed back
+    /// through it would satisfy both. The stage lines are what distinguish them — the journal stage
+    /// and the 8-stage total exist only on the in-place path, "staging pass" only on the staged one
+    /// — so they are asserted here too. The same hole was fixed once already in
+    /// <c>AcceptanceTests.InPlaceAndOutProduceIdenticalBytes</c>; this test differs from it in
+    /// needing no oracle, so it still earns its place.
+    /// </para>
     /// </summary>
     [SkippableFact]
     public void InPlaceProducesTheSameBytesAsOutAndLeavesNoTempFile()
@@ -230,12 +240,42 @@ public class RepairPlayGoCommandTests
 
             Assert.Equal(0, RepairPlayGoCommand.Run(
                 ["repair-playgo", TestPackage.Path, "--out", viaOut]));
-            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+
+            var captured = new StringWriter();
+            var previous = Console.Out;
+            try
+            {
+                Console.SetOut(captured);
+                Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+            }
+            finally { Console.SetOut(previous); }
+            string output = captured.ToString();
 
             Assert.Equal(Bytes.Sha256(viaOut), Bytes.Sha256(copy));
             Assert.Empty(Directory.GetFiles(dir, "*.repair-playgo.tmp"));
+            Assert.Empty(Directory.GetFiles(dir, "*" + RepairJournal.Suffix));
+            Assert.Empty(Directory.GetFiles(dir, "*" + RepairJournal.MarkerSuffix));
+
+            Assert.Contains("[5/8] journalling the original CNT and SI", output);
+            Assert.Contains("[8/8] appending the rebuilt SI", output);
+            Assert.DoesNotContain("staging pass", output);
+            // The journal path is printed on every in-place run, not only under --verbose: it is
+            // the user's only record of where the recovery data went, and they need it at the
+            // moment they can no longer ask the command.
+            Assert.Contains("Journal:    " + RepairJournal.PathFor(copy, null), output);
         }
         finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    /// <summary>
+    /// The journal line belongs to the in-place mode alone: the other two write no journal, and a
+    /// path announced for one that will never exist is worse than no line at all.
+    /// </summary>
+    [SkippableFact]
+    public void OnlyTheInPlaceModeAnnouncesAJournalPath()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        Assert.DoesNotContain("Journal:", CaptureRun(["repair-playgo", TestPackage.Path]));
     }
 
     /// <summary>

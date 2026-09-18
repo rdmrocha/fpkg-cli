@@ -27,10 +27,13 @@ public class InPlaceWriterTests
                                 copy, journal, new Progress(TextWriter.Null, false, false, 4));
 
             Assert.False(File.Exists(journal), "the journal must be gone after a successful write");
+            Assert.False(File.Exists(RepairJournal.MarkerPathFor(copy)),
+                         "and so must the marker that pointed at it — a marker outliving its journal " +
+                         "is exactly the state the next run refuses on");
             Assert.Equal(Bytes.Sha256(Oracle.Path), Bytes.Sha256(copy));
             Assert.Equal(new FileInfo(Oracle.Path).Length, new FileInfo(copy).Length);
         }
-        finally { File.Delete(copy); File.Delete(journal); }
+        finally { File.Delete(copy); File.Delete(journal); File.Delete(RepairJournal.MarkerPathFor(copy)); }
     }
 
     [SkippableFact]
@@ -49,9 +52,18 @@ public class InPlaceWriterTests
             InPlaceWriter.Write(regions, repaired, CntHeader.ReadContentId(regions.Cnt),
                                 copy, journal, new Progress(TextWriter.Null, false, false, 4));
 
+            // WHAT THIS PROVES, AND WHAT IT DOES NOT. It hashes the payload's CONTENT, so it proves
+            // the ~596 MB outer PFS still holds the bytes it held before. It does NOT prove the
+            // writer never touched that range: a writer that dutifully copied the identical bytes
+            // back over it — losing the branch's entire performance claim — passes this unchanged.
+            // Nothing cheap distinguishes the two here: mtime and size are file-wide and change
+            // anyway, and the only honest check is to intercept writes at the handle, which needs a
+            // seam InPlaceWriter does not have. The stage output is the nearest real evidence — an
+            // in-place run prints no "staging pass" line (AcceptanceTests asserts that) — and the
+            // wall clock is the other. Left as content equality, knowingly.
             Assert.Equal(payloadBefore, Bytes.Sha256Range(copy, regions.OuterPfsOffset, regions.OuterPfsSize));
         }
-        finally { File.Delete(copy); File.Delete(journal); }
+        finally { File.Delete(copy); File.Delete(journal); File.Delete(RepairJournal.MarkerPathFor(copy)); }
     }
 
     /// <summary>
@@ -97,10 +109,12 @@ public class InPlaceWriterTests
     ///
     /// <para>
     /// Asserted by a test rather than by reading the code, because the code reads correct by
-    /// accident: it holds only while <see cref="InPlaceWriter.Write"/> has no <c>try</c>/
-    /// <c>finally</c> around the write and deletes the journal outside the <c>using</c>. Adding
-    /// either — a natural-looking tidy-up — would silently destroy recoverability and leave every
-    /// other test in this file green.
+    /// accident: it holds only while <see cref="InPlaceWriter.Write"/> deletes the journal outside
+    /// the <c>using</c> and has no <c>finally</c> around the write. (It does have a <c>catch</c>
+    /// there now — one that announces the mid-repair state and rethrows, deleting nothing. Turning
+    /// that into a <c>finally</c>, or adding a tidy-up inside it, is exactly the natural-looking
+    /// edit that would silently destroy recoverability and leave every other test in this file
+    /// green.)
     /// </para>
     /// </summary>
     [SkippableFact]
@@ -143,7 +157,11 @@ public class InPlaceWriterTests
             Assert.Equal(original, Bytes.Sha256(copy));
             Assert.Equal(originalLength, new FileInfo(copy).Length);
         }
-        finally { File.Delete(copy); File.Delete(journal); File.Delete(reference); }
+        finally
+        {
+            File.Delete(copy); File.Delete(journal); File.Delete(reference);
+            File.Delete(RepairJournal.MarkerPathFor(copy));
+        }
     }
 
     /// <summary>
@@ -341,5 +359,201 @@ public class InPlaceWriterTests
         // It must refuse before journalling, not after: RepairJournal.Write would otherwise have
         // created a sidecar for a repair that can never run.
         Assert.False(File.Exists(journal));
+        Assert.False(File.Exists(RepairJournal.MarkerPathFor("unused.pkg")));
+    }
+
+    /// <summary>
+    /// The OTHER load-bearing invariant, pinned the same way and for the same reason: the rebuilt SI
+    /// must never be longer than the original, because recovery tells an interrupted repair from a
+    /// completed one by the file's length alone.
+    ///
+    /// <para>
+    /// Two plain integers, no package and no doctoring. That is not laziness — it is the only way
+    /// this guard CAN be tested. Reaching it through <see cref="InPlaceWriter.Write"/> needs a
+    /// package whose SI grows under repair, and no such package exists (the test package's shrinks,
+    /// 665,774 -> 664,414). Deleting the guard from the writer therefore left all 87 tests green,
+    /// including the ones whose comments cite it as the thing that makes the length discriminator
+    /// sound. Extracting it was the fix.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void RefusesWhenTheRebuiltSiWouldGrowPastTheOriginal()
+    {
+        var e = Assert.Throws<InvalidOperationException>(
+            () => InPlaceWriter.EnsureSiDoesNotGrow(rebuilt: 665_775, original: 665_774));
+        Assert.Contains("665,775", e.Message);
+        Assert.Contains("665,774", e.Message);
+
+        // Shrinking is the measured, expected case.
+        InPlaceWriter.EnsureSiDoesNotGrow(rebuilt: 664_414, original: 665_774);
+        // And EQUAL is permitted: the guard is `>`, not `>=`. That is deliberate — an SI of exactly
+        // the original length never pushes the file past TargetLength mid-write, so recovery reads
+        // it as "interrupted" and restores a repair that had in fact completed. Annoying, fully
+        // recoverable, and the right direction to be wrong in. Pinned so that tightening the guard
+        // to `>=` is a visible decision rather than a tidy-up.
+        InPlaceWriter.EnsureSiDoesNotGrow(rebuilt: 665_774, original: 665_774);
+    }
+
+    /// <summary>
+    /// C1, the whole reason the marker exists. A repair is interrupted with its journal under
+    /// <c>--work-dir</c>; the journal then disappears (a reboot clearing <c>/tmp</c> is the ordinary
+    /// way). The next run must refuse, loudly and non-zero.
+    ///
+    /// <para>
+    /// Before the marker it did the opposite: it recomputed the journal path from ITS OWN flags,
+    /// found nothing, and fell through to a detector that reads entries 4097/8209 out of the
+    /// already-REPAIRED CNT — so it printed "Nothing to repair" and exited 0 on a package with a
+    /// stale SI. Both halves are asserted: the non-zero exit AND the absence of that sentence.
+    /// </para>
+    /// </summary>
+    [SkippableFact]
+    public void AMarkerWhoseJournalHasVanishedRefusesInsteadOfReportingNothingToRepair()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var copy = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var workDir = Directory.CreateTempSubdirectory("repair-playgo-orphan").FullName;
+        var marker = RepairJournal.MarkerPathFor(copy);
+        try
+        {
+            File.Copy(TestPackage.Path, copy);
+            var regions = PackageRegions.Load(copy);
+            var contentId = CntHeader.ReadContentId(regions.Cnt);
+            var repaired = CntRepair.Repair(regions.Cnt, contentId, Passcode);
+            var journal = RepairJournal.PathFor(copy, workDir);
+            var silent = new Progress(TextWriter.Null, false, false, 4);
+
+            Assert.Throws<IOException>(() =>
+                InPlaceWriter.Write(regions, repaired, contentId, copy, journal, silent,
+                                    faultAfterCntWrite: () => throw new IOException("power loss")));
+
+            // The marker is beside the PACKAGE even though the journal was under --work-dir; that
+            // is the only reason the next run can find its way back.
+            Assert.True(File.Exists(marker), "the marker must sit beside the package, not the journal");
+            Assert.Equal(Path.GetFullPath(journal), File.ReadAllText(marker).Trim());
+
+            // The reboot.
+            Directory.Delete(workDir, recursive: true);
+
+            var captured = new StringWriter();
+            var previousOut = Console.Out;
+            var previousError = Console.Error;
+            string output, errors;
+            var capturedErrors = new StringWriter();
+            int exit;
+            try
+            {
+                Console.SetOut(captured);
+                Console.SetError(capturedErrors);
+                // Note: no --work-dir. That is the point.
+                exit = RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]);
+            }
+            finally { Console.SetOut(previousOut); Console.SetError(previousError); }
+            output = captured.ToString();
+            errors = capturedErrors.ToString();
+
+            Assert.NotEqual(0, exit);
+            Assert.DoesNotContain("Nothing to repair", output);
+            Assert.Contains("MID-REPAIR", errors);
+            Assert.Contains(journal, errors);          // it names where it looked
+            Assert.True(File.Exists(marker), "the marker is the only record left; it must survive");
+        }
+        finally
+        {
+            File.Delete(copy); File.Delete(marker);
+            if (Directory.Exists(workDir)) Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The recoverable half of the same story: the journal is still there, the user simply did not
+    /// repeat <c>--work-dir</c>. The marker redirects recovery to it, so the package comes back.
+    /// Without the marker this run would have found no journal at its recomputed path and reported
+    /// the damaged package as needing nothing.
+    /// </summary>
+    [SkippableFact]
+    public void AMarkerRedirectsRecoveryToAJournalThisRunsFlagsWouldNotFind()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var copy = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var workDir = Directory.CreateTempSubdirectory("repair-playgo-redirect").FullName;
+        var marker = RepairJournal.MarkerPathFor(copy);
+        try
+        {
+            File.Copy(TestPackage.Path, copy);
+            var original = Bytes.Sha256(copy);
+            var regions = PackageRegions.Load(copy);
+            var contentId = CntHeader.ReadContentId(regions.Cnt);
+            var repaired = CntRepair.Repair(regions.Cnt, contentId, Passcode);
+            var journal = RepairJournal.PathFor(copy, workDir);
+            var silent = new Progress(TextWriter.Null, false, false, 4);
+
+            Assert.Throws<IOException>(() =>
+                InPlaceWriter.Write(regions, repaired, contentId, copy, journal, silent,
+                                    faultAfterCntWrite: () => throw new IOException("power loss")));
+            Assert.NotEqual(original, Bytes.Sha256(copy));
+
+            // Non-vacuous: the path this run WOULD compute for itself holds no journal at all.
+            Assert.False(File.Exists(RepairJournal.PathFor(copy, null)));
+
+            Assert.Equal(0, RepairPlayGoCommand.Run(["repair-playgo", copy, "--in-place"]));
+
+            Assert.Equal(original, Bytes.Sha256(copy));
+            Assert.False(File.Exists(journal), "the journal must be consumed by a successful restore");
+            Assert.False(File.Exists(marker), "and the marker with it");
+        }
+        finally
+        {
+            File.Delete(copy); File.Delete(marker);
+            if (Directory.Exists(workDir)) Directory.Delete(workDir, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// I2. <c>--out</c> is not a dry run, so recovery ACTS and the run stops — having written no
+    /// <c>--out</c> file. Returning 0 there told <c>… --out FIXED.pkg &amp;&amp; install FIXED.pkg</c>
+    /// to carry on with a file that does not exist (or, worse, a stale one). It must exit non-zero,
+    /// like the <c>--dry-run</c> branch already did, and say that the INPUT was modified.
+    /// </summary>
+    [SkippableFact]
+    public void OutModeExitsNonZeroWhenRecoveryConsumedTheRun()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var copy = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        var journal = copy + RepairJournal.Suffix;
+        var marker = RepairJournal.MarkerPathFor(copy);
+        var outPath = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".pkg");
+        try
+        {
+            File.Copy(TestPackage.Path, copy);
+            var original = Bytes.Sha256(copy);
+            var regions = PackageRegions.Load(copy);
+            var contentId = CntHeader.ReadContentId(regions.Cnt);
+            var repaired = CntRepair.Repair(regions.Cnt, contentId, Passcode);
+            var silent = new Progress(TextWriter.Null, false, false, 4);
+
+            Assert.Throws<IOException>(() =>
+                InPlaceWriter.Write(regions, repaired, contentId, copy, journal, silent,
+                                    faultAfterCntWrite: () => throw new IOException("power loss")));
+
+            var capturedErrors = new StringWriter();
+            var previous = Console.Error;
+            int exit;
+            try
+            {
+                Console.SetError(capturedErrors);
+                exit = RepairPlayGoCommand.Run(["repair-playgo", copy, "--out", outPath]);
+            }
+            finally { Console.SetError(previous); }
+
+            Assert.NotEqual(0, exit);
+            Assert.False(File.Exists(outPath), "no --out file was produced, and none must appear");
+            Assert.Contains("NO --out file was produced", capturedErrors.ToString());
+            // And it says the thing the docs never admitted --out could do.
+            Assert.Contains("INPUT package was modified", capturedErrors.ToString());
+            // The recovery itself still happened — that is what makes the non-zero exit honest
+            // rather than a refusal to act.
+            Assert.Equal(original, Bytes.Sha256(copy));
+        }
+        finally { File.Delete(copy); File.Delete(journal); File.Delete(marker); File.Delete(outPath); }
     }
 }

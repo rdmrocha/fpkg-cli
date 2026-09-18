@@ -91,4 +91,42 @@ public class SiRepairTests
         }
         finally { File.Delete(tmp); }
     }
+
+    /// <summary>
+    /// The FIRST naps_meta_3xx path was read with a raw indexer before the loop that has a proper
+    /// message for it, so a package missing only that member died on a bare
+    /// <c>KeyNotFoundException</c> — which the CLI turns into an `error:` line naming nothing — while
+    /// a package missing any of the other three got a message that says which. The two must agree.
+    ///
+    /// <para>
+    /// Asserted over <see cref="SiRepair.EnsureRebuildable"/> rather than <c>Rebuild</c> so it needs
+    /// no package and no CRC pass: the refusal is a property of the member set alone, which is
+    /// exactly why the command can now ask it before writing anything.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void EveryMissingNapsMetaMemberIsNamedInTheRefusal()
+    {
+        var complete = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            [SiRepair.NapsMeta18Path] = [7, 7, 7],
+        };
+        foreach (var path in SiRepair.NapsMeta300Paths)
+            complete[path] = [1, 2, 3];
+        SiRepair.EnsureRebuildable(complete);   // the baseline: this set is acceptable
+
+        foreach (var missing in SiRepair.NapsMeta300Paths.Append(SiRepair.NapsMeta18Path))
+        {
+            var members = complete.Where(m => m.Key != missing)
+                                  .ToDictionary(m => m.Key, m => m.Value, StringComparer.Ordinal);
+            var ex = Assert.Throws<InvalidDataException>(() => SiRepair.EnsureRebuildable(members));
+            Assert.Contains(missing, ex.Message);
+        }
+
+        // And the identity check the single-blob rebuild rests on.
+        var differing = new Dictionary<string, byte[]>(complete, StringComparer.Ordinal);
+        differing[SiRepair.NapsMeta300Paths[2]] = [1, 2, 4];
+        Assert.Contains("not", Assert.Throws<InvalidDataException>(
+            () => SiRepair.EnsureRebuildable(differing)).Message);
+    }
 }
