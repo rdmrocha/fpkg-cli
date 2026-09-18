@@ -6,13 +6,13 @@ Builds PS5 debug FPKG packages — and it does two things the official tooling d
 
 **It runs on macOS and Linux**, arm64 or x64. The packaging engine is **LibProsperoPkg by Drakmor**; this is a command-line front end for it, because the official GUI is Windows-only WinForms and cannot run here.
 
-This is **fpkg 0.6.8**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.8 belongs with a LibProsperoPkg 0.6.8 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
+This is **fpkg 0.6.9**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.9 belongs with a LibProsperoPkg 0.6.9 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
 
 Nothing in this zip is Drakmor's work, Sony's, or RAD's. You supply those yourself.
 
 ## What you need
 
-- **A LibProsperoPkg release** (0.6.8 or compatible) — unzip it somewhere; that folder is your working directory.
+- **A LibProsperoPkg release** (0.6.9 or compatible) — unzip it somewhere; that folder is your working directory.
 - **The .NET 10 runtime**: `brew install dotnet`.
 - macOS or Linux, arm64 or x64. One `fpkg-cli-<version>.zip` runs on all four: it is portable IL, not a per-platform build.
 - **Optional but worth it: a RAD Oodle library**, version 2.9.16. It makes builds roughly three times faster. Get it *before* you patch — see "Optional: the native Oodle encoder" below for the exact file names to look for.
@@ -115,6 +115,8 @@ Keep the opt-outs in mind only if you know why you want them: with any of them o
 ```
 
 `--rebuild-source` and `template` read package entries only and never touch the inner filesystem, so they finish in seconds even on a large package.
+
+`verify` also warns when a package's files sit outside its scenario's initial PlayGo chunk set. That shape is structurally legal, so the library's own verifier accepts it, but PlayGo treats anything in a later chunk as not yet downloaded — so an installed package reports most of itself as missing. The warning does not change the exit code; rebuilding fixes it.
 
 A template is the `sce_sys` inputs plus a `.gp5` project carrying the content id, passcode, entitlement key and PlayGo counts recovered from the package. **The payload is not included** — copy your own data tree in beside it, then:
 

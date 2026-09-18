@@ -173,6 +173,61 @@ Once `./fpkg patch` has been run with an Oodle library present, this same comman
 
 Not yet exposed by the CLI: `SdkVersionOverride`, `PublishingToolsLibraryPath`.
 
+## Upstream 0.6.9
+
+Release notes: generation of language files from playgo-scenario.json; PlayGo configuration validation improved. Both true, and both understate it — this release rebuilds PlayGo. Library +289 lines net across 29 hunks; the GUI changed by three lines plus strings.
+
+### The 0.6.8 regression it quietly reverts
+
+One call site, three releases:
+
+```csharp
+// 0.6.7   initialChunkCount = chunkCount
+// 0.6.8   initialChunkCount = 1
+// 0.6.9   initialChunkCount = chunkCount
+```
+
+0.6.8 kept `BuildFicm(BuildAutomaticFileChunkIds(fileCount, chunkCount))`, which spreads every file evenly across chunks 0..N-1, while declaring only chunk zero initial. Publishing Tools documents `--initial_chunk_count` as "the number of initial chunks" and its validator accepts `1 <= initial <= len(sequence)`, so the shape is legal — but it means the leading run of the download order that must be present before the title starts is chunk zero alone. Everything in a later chunk is, to PlayGo, not downloaded.
+
+0.6.9 fixes it from both ends: `initialChunkCount = chunkCount`, and `BuildFicm(new byte[fileCount])` so every file belongs to chunk zero. `BuildAutomaticFileChunkIds` survives but is no longer called.
+
+The same design appears independently in the SDK-driven toolkit's own GP5 generator: *"Game files remain in chunk zero; each language declared by playgo-scenario.json gets a small generated, uncompressed payload"* and *"every scenario contains all 100 chunks and marks all of them as initial/required."* Two implementations converging is the strongest evidence available without a console.
+
+**The library's verifier does not catch it.** Its scenario check is `total < 1 || total > chunkCount || initial > total`, so `initial = 1` passes. This CLI adds `PlayGoInitialChunkProblem`, which cross-references the FICM file-to-chunk map against the smallest initial count and warns. Measured on one source built twice: the 0.6.8 build reports "PlayGo layout is valid" from the library and "37 of 43 file mappings sit in chunks at or above index 1" from ours; the 0.6.9 build is clean.
+
+### Language chunks
+
+New `BuildLanguageChunkLayout(totalSize, chunkCount, languageMask)`: chunk zero keeps the bulk, each selected language gets up to 1 MiB (64 KiB-aligned) carved out of it, and per-chunk language masks are assigned round-robin so none is empty. Chunks past the language count get a full mask and a zero extent, which Publishing Tools treats as informational ("Chunk #%03d does not contain any files.").
+
+`SplitMainExtent` is gone. That retires this CLI's zero-length-chunk guard, which existed only because extents used to be an even division of the image.
+
+### Scenario presentation
+
+`ResolvePlayGoCounts` became `ResolvePlayGoConfiguration`, returning scenario labels, default scenario id, default language, and the source `playgo-scenario.json` itself, which is now emitted verbatim when valid. Two new fields are read from it: `chunkSupportedLanguages` and `chunkDefaultLanguage`. `MaxScenarioCount` dropped 64 -> **5**, matching the SDK toolkit's `MAX_PLAYGO_SCENARIO_COUNT = 5` ("Runtime API limit in the supported Prospero SDK (SCE_PLAYGO_MAX_SCENARIO)").
+
+### What the official binaries say
+
+Reverse-engineered from `libScePubTools.dll`, `prospero-pub-cmd.exe` and `ric.exe`. Constraints this CLI's output was checked against and satisfies:
+
+| rule | where |
+|---|---|
+| `scenario_type` must be `0x21` (playmode); it is the only type PS5 GP5 accepts | validator; `--type [playmode]` is the only option in the CLI help |
+| first chunk reference of every scenario must be chunk 0 | error `0x80001055` |
+| every scenario must list every chunk, no duplicates | errors `0x80001054`, `0x80001053` |
+| `1 <= initial_chunk_count <= len(sequence)`, stored u16 at scenario `+0x14` | GP5 parser |
+| `default_language` is a u8 index at header `0x24`, must be a set bit of the mask | error "inconsistent Supported Languages(%016llx)/Default Language(%u)" |
+| per-chunk language mask at chunk-attr `+0x10`; zero is legal only for a fully unused chunk | error `0x80001056` "Chunk #%03d is never downloaded because no languages are assigned to it." |
+| content id occupies 48 bytes at `0x40` (a 36-char id is NUL-padded) | dumper reads `%.48s` |
+| extent offset and length are 48-bit; bits 48..51 of the offset are an image index | payload calculator masks with `0xFFFFFFFFFFFF` |
+| limits: 1000 chunks, 65535 mchunks, 5 scenarios | validator |
+| language id N occupies bit `1 << (63 - N)`; ids 0..30 are the standard set | two independent call sites |
+
+One thing worth watching: a header language mask of `0xFFFFFFFFFFFFFFFF` is a **sentinel meaning "PlayGo Languages are not supported"** in the official tool, not "every language". LibProsperoPkg uses `ulong.MaxValue` as its all-languages default and `BuildLanguageChunkLayout` iterates it as a real mask. Not acted on here, because changing it would diverge from the GUI, but it is a candidate for the next surprise.
+
+### Patcher
+
+All nine IL sites resolve on 0.6.9 with the same ordinals. No change needed.
+
 ## Upstream 0.6.8
 
 Release notes: improved image checks including PlayGo ("please verify your images"); fixed an issue with PlayGo map creation; default DRM Standard; automatic downgrading of the required software version to the SDK-specified version. All four confirmed below. Library +552 lines, GUI +3; only `LibProsperoPkg.*` and the GUI changed.

@@ -1,5 +1,31 @@
 # Changelog
 
+## fpkg 0.6.9
+
+Tracks LibProsperoPkg 0.6.9. Re-run `./fpkg patch` after updating.
+
+### If you built anything with 0.6.8, check it
+
+0.6.8 declared only chunk 0 as PlayGo-initial while still spreading the game's files across every chunk. PlayGo reads that as "almost none of this title is downloaded yet", which can make an otherwise fine package misbehave once installed. 0.6.9 fixes it upstream — all files go in chunk zero and every chunk is initial.
+
+The library's own verifier does **not** flag it: an initial count of 1 is structurally legal and passes. So `fpkg verify --quick` now adds its own warning:
+
+```
+WARNING: PlayGo: 37 of 43 file mappings sit in chunks at or above index 1 (highest 7),
+but the scenario declares only 1 of its 8 chunk(s) as initial. A package installed whole
+still reports those files as not downloaded. Rebuild it.
+```
+
+It is a warning, not an issue, so the exit code is unchanged. Run it over anything built with 0.6.8. Packages from earlier releases are not affected.
+
+### PlayGo is rebuilt around languages
+Chunk zero now holds the game files, each selected language gets a small chunk of its own with a real extent, and every chunk past the language count is empty by design. Scenario names and localisations in a source `playgo-scenario.json` are carried through instead of being replaced with generated ones, including its `chunkSupportedLanguages` and `chunkDefaultLanguage`.
+
+Upstream also dropped the scenario limit from 64 to **5**, matching the SDK's own `SCE_PLAYGO_MAX_SCENARIO`.
+
+### Removed
+The zero-length-chunk guard. It existed because chunk extents used to be an even division of the image, so a chunk count the image could not fill produced empty extents. Extents are no longer computed that way and empty chunks are now intentional, so the guard would reject ordinary builds.
+
 ## fpkg 0.6.8
 
 Tracks LibProsperoPkg 0.6.8. Re-run `./fpkg patch` after updating.

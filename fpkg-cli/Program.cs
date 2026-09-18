@@ -130,9 +130,9 @@ internal static class Program
           --playgo <1-255>        generated PlayGo chunk count      (library default: 100)
                                   Pass 1 for the publisher nwonly profile. Ignored when the
                                   source carries playgo-chunk.dat or playgo-scenario.json, or
-                                  when a GP5 declares chunk_info. Refused when the source has
-                                  fewer 64 KiB blocks than chunks, which the library itself
-                                  does not check and would build as zero-length extents.
+                                  when a GP5 declares chunk_info. Chunk zero holds the game
+                                  files; each selected language gets a small chunk of its own,
+                                  and any chunk past the language count is empty by design.
           --playgo-languages <l>  comma-separated PlayGo language codes, or "all" (default all)
                                   Also picks the default language written into
                                   playgo-chunk.dat: en-US when present, else the first set.
@@ -459,7 +459,12 @@ internal static class Program
             Console.WriteLine();
             foreach (var check in result.Checks) Console.WriteLine($"  ok: {check}");
             foreach (var issue in result.Issues) Console.WriteLine($"  ISSUE: {issue}");
-            Console.WriteLine($"\n{result.Issues.Count} issue(s)");
+            // Reported after the library's own findings, and separately, because it is a warning
+            // about a structurally valid package rather than one of its issues.
+            var initialChunks = PlayGoInitialChunkProblem(pkg, passcode);
+            if (initialChunks is not null) Console.WriteLine($"  WARNING: {initialChunks}");
+            Console.WriteLine($"\n{result.Issues.Count} issue(s)" +
+                              (initialChunks is null ? "" : ", 1 warning"));
             return result.Issues.Count == 0 ? 0 : 1;
         }
 #else
@@ -475,6 +480,76 @@ internal static class Program
     }
 
 #if LIB_HAS_ARCHIVE_067
+    /// <summary>
+    /// Reports a PlayGo map whose files live outside the scenario's initial chunk set.
+    ///
+    /// The library's own verifier does not catch this. Its scenario check is
+    /// <c>total &lt; 1 || total &gt; chunkCount || initial &gt; total</c>, so an initial count of 1
+    /// is structurally legal and passes — which it is, per Publishing Tools, whose
+    /// <c>--initial_chunk_count</c> is documented as "the number of initial chunks" and validated
+    /// only as <c>1 &lt;= initial &lt;= len(sequence)</c>.
+    ///
+    /// It is nonetheless wrong for a package that is installed whole. initial_chunk_count names
+    /// the leading run of the download order that has to be present before the title can start;
+    /// anything in a later chunk is, as far as PlayGo is concerned, not downloaded yet. A build
+    /// that spreads files across every chunk and then declares only chunk zero initial therefore
+    /// tells the console that almost none of the game is available. That combination was produced
+    /// for exactly one upstream release, and is the likeliest cause of a title that installs and
+    /// then misbehaves.
+    ///
+    /// Returns null when there is nothing to say.
+    /// </summary>
+    private static string? PlayGoInitialChunkProblem(string packagePath, string passcode)
+    {
+        byte[]? chunkDat, ficm;
+        try
+        {
+            chunkDat = ProsperoPackageArchive.TryReadCntEntry(packagePath, passcode, 4097u);
+            ficm = ProsperoPackageArchive.TryReadCntEntry(packagePath, passcode, 8209u);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
+        {
+            return null;   // diagnostics only; the library's own checks own the hard failures
+        }
+        if (chunkDat is null || ficm is null || chunkDat.Length < 256 || ficm.Length < 16) return null;
+
+        // Scenario attributes: section descriptor at 0xE0, 32 bytes per scenario, initial count at
+        // +20 and the scenario's own chunk-list length at +22.
+        int scenarioCount = BinaryPrimitives.ReadUInt16LittleEndian(chunkDat.AsSpan(14));
+        int scenariosOffset = (int)BinaryPrimitives.ReadUInt32LittleEndian(chunkDat.AsSpan(224));
+        if (scenarioCount < 1 || scenariosOffset <= 0) return null;
+        if (scenariosOffset + scenarioCount * 32 > chunkDat.Length) return null;
+
+        int smallestInitial = int.MaxValue, itsTotal = 0;
+        for (int i = 0; i < scenarioCount; i++)
+        {
+            int record = scenariosOffset + i * 32;
+            int initial = BinaryPrimitives.ReadUInt16LittleEndian(chunkDat.AsSpan(record + 20));
+            int total = BinaryPrimitives.ReadUInt16LittleEndian(chunkDat.AsSpan(record + 22));
+            if (initial < smallestInitial) { smallestInitial = initial; itsTotal = total; }
+        }
+        if (smallestInitial == int.MaxValue || smallestInitial >= itsTotal) return null;
+
+        // FICM: 16-byte header, then two bytes per file with the chunk id in the first.
+        uint mapOffset = BinaryPrimitives.ReadUInt32LittleEndian(ficm.AsSpan(8));
+        uint mapSize = BinaryPrimitives.ReadUInt32LittleEndian(ficm.AsSpan(12));
+        if (mapOffset != 16 || mapSize == 0 || 16 + (long)mapSize > ficm.Length) return null;
+
+        int outside = 0, highest = 0;
+        for (int i = 0; i < (int)mapSize; i += 2)
+        {
+            int chunk = ficm[16 + i];
+            if (chunk > highest) highest = chunk;
+            if (chunk >= smallestInitial) outside++;
+        }
+        if (outside == 0) return null;
+
+        return $"PlayGo: {outside:N0} of {mapSize / 2:N0} file mappings sit in chunks at or above " +
+               $"index {smallestInitial} (highest {highest}), but the scenario declares only " +
+               $"{smallestInitial} of its {itsTotal} chunk(s) as initial. A package installed whole " +
+               "still reports those files as not downloaded. Rebuild it.";
+    }
+
     /// <summary>
     /// The library's own quick verifier, run over a package this CLI just built. Reports every
     /// check by name and returns false if any issue was raised.
@@ -976,6 +1051,12 @@ internal static class Program
         Console.WriteLine(PlayGoStatus(source, options.PlayGoChunkCount, gp5Path));
         // Only meaningful when the count actually comes from the flag; when the source or a GP5
         // supplies it, PlayGoChunkCount is never consulted and checking it rejects good builds.
+#if !LIB_HAS_PLAYGO_LANGUAGE_CHUNKS
+        // Only meaningful while chunk extents came from SplitMainExtent, which divided the image
+        // evenly and therefore produced a zero-length extent for every chunk the image could not
+        // fill. BuildLanguageChunkLayout replaced that: chunk zero keeps the bulk of the image,
+        // each selected language gets a small extent, and every chunk past the language count is
+        // deliberately zero-length. Refusing those would reject ordinary builds.
 #if HAS_VIRTUAL_SOURCE
         long? measuredSourceBytes = containerSource?.ContentBytes;
 #else
@@ -984,6 +1065,7 @@ internal static class Program
         if (PlayGoCountComesFromFlag(source, gp5Path)
             && PlayGoChunkCountProblem(source, options.PlayGoChunkCount, measuredSourceBytes) is string chunkProblem)
             return Fail(chunkProblem);
+#endif
 #if LIB_HAS_IMAGE_MODE
         Console.WriteLine($"Building {options.Mode} / {options.OutputFormat} / image={imageMode}");
 #else
@@ -1760,6 +1842,7 @@ internal static class Program
         }
     }
 
+#if !LIB_HAS_PLAYGO_LANGUAGE_CHUNKS
     /// <summary>
     /// 0.6.4 refused a chunk count the image cannot fill:
     ///
@@ -1797,6 +1880,7 @@ internal static class Program
                $"extent, which the library does not check and would build anyway. Use --playgo " +
                $"{Math.Max(1, blocks)} or fewer.";
     }
+#endif
 
     private static int Api(string[] args)
     {
