@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Fpkg.Cli.RepairPlayGo;
 using Xunit;
 
@@ -23,7 +24,23 @@ public class RepairPlayGoCommandTests
     /// <summary>
     /// The user-visible complaint this fixes: the command used to run PlayGoInitialChunkProblem,
     /// PackageRegions.Load and CntEntryTable.Parse — seconds apiece on a 661 MB package — before
-    /// printing a single line. The fix is ORDERING, so the assertion is about order, not presence.
+    /// printing a single line.
+    ///
+    /// <para>
+    /// TWO assertions, each pinning one half, and neither satisfiable by the old ordering.
+    /// </para>
+    /// <para>
+    /// <b>Package: is the FIRST line of output.</b> Not merely "before Problem:" — ReportPlan has
+    /// always printed those two lines two apart in that order, so that assertion passed with the
+    /// defect fully present. First-line is the user's actual complaint.
+    /// </para>
+    /// <para>
+    /// <b>At least one <c>reading package N%</c> line exists.</b> Progress.Report is a no-op while
+    /// no stage is open, and those percentages come from inside PackageRegions.Load, so a single
+    /// one of them proves the stage was announced BEFORE the read rather than after it. Anchoring
+    /// on a later line instead — an SI member, say — does not: those are printed well after Load
+    /// and Parse return, so a banner moved to sit between them still precedes it.
+    /// </para>
     /// </summary>
     [SkippableFact]
     public void TheDryRunAnnouncesItselfBeforeTheSlowWork()
@@ -31,12 +48,17 @@ public class RepairPlayGoCommandTests
         Skip.IfNot(TestPackage.Exists, "test package not present");
         string s = CaptureRun(["repair-playgo", TestPackage.Path]);
 
-        int pkg = s.IndexOf("Package:", StringComparison.Ordinal);
-        int problem = s.IndexOf("Problem:", StringComparison.Ordinal);
-        Assert.True(pkg >= 0 && problem > pkg, "Package: must be printed before Problem:");
-        Assert.Contains("reading package", s);
-        // The stage banner has to come out before the report, not with it.
-        Assert.True(s.IndexOf("reading package", StringComparison.Ordinal) < problem);
+        string firstLine = s.Split('\n', StringSplitOptions.RemoveEmptyEntries)[0];
+        Assert.StartsWith("Package:", firstLine);
+
+        int banner = s.IndexOf("[1/4] reading package", StringComparison.Ordinal);
+        Assert.True(banner >= 0, "the stage 1 banner was never printed");
+
+        var percent = Regex.Match(s, @"reading package\s+\d+%");
+        Assert.True(percent.Success,
+                    "no 'reading package N%' line: stage 1 was not open while the package was " +
+                    "being read, so it was announced after the slow work rather than before it");
+        Assert.True(banner < percent.Index, "the banner must precede its own percentages");
     }
 
     [SkippableFact]
@@ -98,25 +120,60 @@ public class RepairPlayGoCommandTests
         Assert.False(Directory.Exists(file));
     }
 
+    /// <summary>
+    /// A run that refuses before it starts must leave NOTHING behind — including the --temp-dir it
+    /// would otherwise have created. A flag that only relocates a temporary file has no business
+    /// leaving a permanent directory on a run that never began.
+    /// </summary>
     [Fact]
-    public void TempDirIsCreatedWhenItDoesNotExist()
+    public void ARefusedRunDoesNotLeaveItsTempDirBehind()
     {
         var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         try
         {
-            // The package is missing, so the run refuses — but --temp-dir is validated and created
-            // first, which is the point being asserted.
             Assert.NotEqual(0, RepairPlayGoCommand.Run(
                 ["repair-playgo", "nonexistent.pkg", "--temp-dir", dir]));
+            Assert.False(Directory.Exists(dir),
+                         "a run that refused on its package still created its --temp-dir");
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    /// <summary>
+    /// The dry run reaches no writer, so nothing ever lands in --temp-dir — but the directory is
+    /// still created, which is what proves the flag was honoured rather than ignored.
+    /// </summary>
+    [SkippableFact]
+    public void TempDirIsCreatedWhenItDoesNotExist()
+    {
+        Skip.IfNot(TestPackage.Exists, "test package not present");
+        var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        try
+        {
+            Assert.Equal(0, RepairPlayGoCommand.Run(
+                ["repair-playgo", TestPackage.Path, "--temp-dir", dir]));
             Assert.True(Directory.Exists(dir));
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
     }
 
     [Fact]
-    public void TempDirWithoutAPathIsRefused() =>
-        Assert.NotEqual(0, RepairPlayGoCommand.Run(
-            ["repair-playgo", "nonexistent.pkg", "--temp-dir"]));
+    public void TempDirWithoutAPathIsRefused()
+    {
+        var previous = Console.Error;
+        var captured = new StringWriter();
+        try
+        {
+            Console.SetError(captured);
+            // A bare --temp-dir parses to a null value, which must be refused BY NAME rather than
+            // silently falling through to the default placement.
+            Assert.NotEqual(0, RepairPlayGoCommand.Run(
+                ["repair-playgo", "nonexistent.pkg", "--temp-dir"]));
+        }
+        finally { Console.SetError(previous); }
+
+        Assert.Contains("--temp-dir needs a path", captured.ToString());
+    }
 
     [SkippableFact]
     public void DryRunIsTheDefaultAndWritesNothing()

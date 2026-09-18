@@ -93,6 +93,11 @@ internal sealed class Progress
         if (!_verbose)
             return;
 
+        // On a TTY the percentage line is left open (written with \r and no newline), so a detail
+        // line written straight out would print ON TOP of it and leave the percentage's tail
+        // trailing past the end of the shorter of the two. Erase it first; the next Report reopens
+        // one.
+        ClearOpenLine();
         _output.WriteLine($"  {line}");
     }
 
@@ -104,16 +109,24 @@ internal sealed class Progress
         if (_stageName is null)
             return;
 
-        if (_isTty && _lineOpen)
-        {
-            _output.Write("\r" + new string(' ', _stageName.Length + 8) + "\r");
-            _lineOpen = false;
-        }
-
+        ClearOpenLine();
         _stageClock.Stop();
         _output.WriteLine($"  {_stageName} done in {FormatElapsed(_stageClock.Elapsed)}");
 
         _stageName = null;
+    }
+
+    /// <summary>
+    /// Erases the open <c>\r … n%</c> line, if there is one. No-op when not on a TTY (every line is
+    /// already newline-terminated there) or when nothing is open.
+    /// </summary>
+    private void ClearOpenLine()
+    {
+        if (!_isTty || !_lineOpen || _stageName is null)
+            return;
+
+        _output.Write("\r" + new string(' ', _stageName.Length + 8) + "\r");
+        _lineOpen = false;
     }
 
     private static string FormatElapsed(TimeSpan elapsed) =>

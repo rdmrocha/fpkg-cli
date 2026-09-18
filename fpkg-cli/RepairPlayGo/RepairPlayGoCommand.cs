@@ -91,12 +91,6 @@ internal static class RepairPlayGoCommand
             if (File.Exists(tempDir))
                 return Program.Fail(
                     $"--temp-dir '{tempDir}' is an existing file, not a directory.");
-            try { Directory.CreateDirectory(tempDir); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                          or ArgumentException or NotSupportedException)
-            {
-                return Program.Fail($"--temp-dir '{tempDir}' could not be created: {ex.Message}");
-            }
         }
         if (!File.Exists(path))
             return Program.Fail($"no such file: {path}");
@@ -108,6 +102,20 @@ internal static class RepairPlayGoCommand
                 "Remove it or choose another path.");
 
         bool write = inPlace || outPath is not null;
+
+        // CREATED LAST, after every argument and package check above has passed. Creating it with
+        // the other flag validation was tidier to read and left an empty directory behind on every
+        // run that then refused — a flag that only relocates a temporary file has no business
+        // leaving a permanent trace when the run never starts.
+        if (tempDir is not null)
+        {
+            try { Directory.CreateDirectory(tempDir); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                          or ArgumentException or NotSupportedException)
+            {
+                return Program.Fail($"--temp-dir '{tempDir}' could not be created: {ex.Message}");
+            }
+        }
 
         if (tempDir is not null && outPath is not null)
             WarnIfTempDirIsOnAnotherDevice(tempDir, Path.GetFullPath(outPath));
@@ -171,7 +179,14 @@ internal static class RepairPlayGoCommand
             foreach (var drive in DriveInfo.GetDrives())
             {
                 string root = drive.RootDirectory.FullName;
+                // A PREFIX match is not enough: "/Volumes/Foo" prefixes "/Volumes/FooBar/x", which
+                // is a different volume. The match must land on a path separator (or be the root
+                // itself, which already ends in one).
                 if (!full.StartsWith(root, StringComparison.Ordinal))
+                    continue;
+                if (!root.EndsWith(Path.DirectorySeparatorChar) &&
+                    full.Length > root.Length &&
+                    full[root.Length] != Path.DirectorySeparatorChar)
                     continue;
                 if (best is null || root.Length > best.Length)
                     best = root;
@@ -306,21 +321,31 @@ internal static class RepairPlayGoCommand
     private const int DryRunStages = 4;
     private const int WriteStages = 7;
 
+    /// <summary>
+    /// Recovery restores and then STOPS, so it runs exactly one stage and none of the repair's.
+    /// It gets its own Progress for that reason alone: sharing the repair's would have printed
+    /// "[1/7]" on a run that was always going to end after the first stage.
+    /// </summary>
+    private const int RecoveryStages = 1;
+
     private static int Repair(string path, string passcode, string? target, bool inPlace,
                               string? tempDir = null, bool verbose = false)
     {
         // BEFORE every guard, deliberately. The guards ask whether this package is a suitable
         // subject for the repair; this asks whether the file on disk is intact at all, and a
         // half-written package has no business being judged on its suitability first.
-        var progress = new Progress(Console.Out, verbose,
-                                    isTty: !Console.IsOutputRedirected,
-                                    totalStages: target is null ? DryRunStages : WriteStages);
+        bool isTty = !Console.IsOutputRedirected;
 
-        // target is null exactly when this is a dry run, which is also how the stage count above is
+        // target is null exactly when this is a dry run, which is also how the stage count below is
         // chosen — the two must not disagree about the mode.
-        int recovery = RecoverIfNeeded(path, tempDir, progress, dryRun: target is null);
+        int recovery = RecoverIfNeeded(path, tempDir,
+                                       new Progress(Console.Out, verbose, isTty, RecoveryStages),
+                                       dryRun: target is null);
         if (recovery >= 0)
             return recovery;
+
+        var progress = new Progress(Console.Out, verbose, isTty,
+                                    totalStages: target is null ? DryRunStages : WriteStages);
 
         // FIRST, and before any of the three slow calls below. PlayGoInitialChunkProblem,
         // PackageRegions.Load and CntEntryTable.Parse each take seconds on a 661 MB package, and

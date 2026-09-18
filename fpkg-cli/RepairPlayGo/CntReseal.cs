@@ -176,8 +176,14 @@ internal static class CntReseal
         // held (zero in a builder-produced package).
         var digestTable = new byte[entryCount * 32];
         digests.Payload.AsSpan(0, Math.Min(digests.Payload.Length, digestTable.Length)).CopyTo(digestTable);
-        // The per-entry SHA3 pass walks the whole body, so the bytes it has digested so far are the
-        // percentage source for this stage. Observation only: nothing below reads `digested` back.
+        // The per-entry SHA3 pass is the percentage source for this stage. The denominator is the
+        // sum of what this loop will ACTUALLY digest, not bodySize: the body also holds DIGESTS
+        // itself (slot 0, never computed), the inter-entry alignment padding and the rounding tail,
+        // so measuring against bodySize would stop several percent short of 100 and read as a hang.
+        // Observation only: nothing below reads either number back.
+        long toDigest = 0;
+        for (int i = 1; i < byId.Count; i++)
+            toDigest += byId[i].Encrypted ? Align(byId[i].DataSize, 16) : byId[i].DataSize;
         long digested = 0;
         for (int i = 1; i < byId.Count; i++)
         {
@@ -187,7 +193,7 @@ internal static class CntReseal
             hash.CopyTo(digestTable.AsSpan(32 * i));
             hash.CopyTo(outCnt.AsSpan((int)digests.DataOffset + 32 * i));
             digested += length;
-            progress?.Report(digested, (long)bodySize);
+            progress?.Report(digested, toDigest);
             progress?.Detail($"digest {e.Id,-6} {e.Name,-24} {length,9:N0} bytes -> " +
                              $"{Convert.ToHexString(hash.AsSpan(0, 8)).ToLowerInvariant()}…");
         }
