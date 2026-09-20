@@ -67,7 +67,7 @@ official Windows tools produce.
 
 | # | Purpose |
 |---|---|
-| 1–3 | Read files from a container source (`.ffpfsc`, exFAT image) instead of a folder |
+| 1–3 | Add support for reading files from a container source (`.ffpfsc`, exFAT image) |
 | 4 | Fix a cached stream that breaks when reading plaintext blocks from a container |
 | 5–7 | Let the executable probes read from a container source too |
 | 8–9 | Let the SDK-version rewrite read the original executable from a container source |
