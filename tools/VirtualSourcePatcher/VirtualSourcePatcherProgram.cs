@@ -55,6 +55,7 @@ public static class VirtualSourcePatcherProgram
             var innerFile = Sites.Type(module, "LibProsperoPkg.PFS.ProsperoPs5InnerFile");
             var fsFile = Sites.Type(module, "LibProsperoPkg.PFS.FSFile");
             var napsMeta = Sites.Type(module, "LibProsperoPkg.PKG.ProsperoNapsMeta");
+            var assembler = Sites.Type(module, "LibProsperoPkg.PFS.ProsperoPs5InnerImageAssembler");
             var plaintextReader = napsMeta.NestedTypes.SingleOrDefault(t => t.Name == "PlaintextBlockReader")
                 ?? throw new InvalidOperationException("ProsperoNapsMeta.PlaintextBlockReader not found");
 
@@ -95,6 +96,7 @@ public static class VirtualSourcePatcherProgram
                 Console.WriteLine($"  located {name,-24} {m.FullName}");
 
             Console.WriteLine($"  located {"PlaintextBlockReader",-24} {plaintextReader.FullName}");
+            Console.WriteLine($"  located {"InnerImageAssembler",-24} {assembler.FullName}");
 
             string shimPath = Path.Combine(Path.GetDirectoryName(output)!, "FpkgVirtualSource.dll");
             Sites.Expect(File.Exists(shimPath), $"FpkgVirtualSource.dll must sit next to {output}");
@@ -108,9 +110,18 @@ public static class VirtualSourcePatcherProgram
                 Rewrites.VirtualiseProbe(probe, shim);
             Rewrites.WidenPlaintextBlockReader(plaintextReader, shim);
             Rewrites.VirtualiseSelfPatchCopy(sdkSelfCopy[0], shim);
+            Rewrites.BypassLanguageFillerDedup(assembler, shim);
+            Rewrites.AlignLanguageFillerBlocks(assembler, shim);
+            Rewrites.AlignLanguageFillerWrites(assembler, shim);
+            Rewrites.PlaintextLicenseCntEntries(
+                Sites.Type(module, "LibProsperoPkg.PKG.ProsperoCntEntryPolicy"), shim);
+            Rewrites.PlaceLanguageFillersLast(assembler, shim);
+            Rewrites.WalkDirectoriesCaseInsensitively(assembler, module);
+            Rewrites.SuppressAboutRightSprx(
+                Sites.Type(module, "LibProsperoPkg.PKG.ProsperoPkgBuilder"), shim);
 
             module.Write(output);
-            Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7, 8, 9)");
+            Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)");
             return 0;
         }
         catch (Exception ex)

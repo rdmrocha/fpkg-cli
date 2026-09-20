@@ -96,6 +96,60 @@ public class OodleBackendTests
     }
 
     /// <summary>
+    /// An all-zero block must come out as the container's canonical constant-run form: one
+    /// eight-byte bare-entropy array per 128 KiB sub-chunk. That shape is what the library's
+    /// NAPS reader recognises as a deduplicated zero span (FirstChunkCompressedLength == 8
+    /// and CompressedLength == 16), and it is what Sony's own Publishing Tools emit. RAD's
+    /// Oodle cannot express it, so OodleBackend routes an all-zero block to the library's
+    /// built-in managed encoder; before that routing existed every zero half was stored raw
+    /// at 128 KiB, which cost about 30 MB on a package with 31 one-MiB language fillers.
+    ///
+    /// The lengths are asserted, not the bytes: they are computed from the sub-chunk length
+    /// and the repeated symbol, never pasted in.
+    /// </summary>
+    [SkippableFact]
+    public void AllZeroBlocksTakeTheCanonicalEightByteConstantRunForm()
+    {
+        Skip.IfNot(OodleBackend.IsAvailable(null), OodleBackend.Describe(null));
+
+        foreach (var level in new[] { -4, 1, 7, 9 })
+        {
+            Assert.True(OodleBackend.TryEncodeBlock(new byte[131072], level,
+                out var half, out var halfMulti, out var halfFirst, out var halfFlags));
+            Assert.Equal(8, half.Length);
+            Assert.False(halfMulti);
+            Assert.True(OodleBackend.VerifyWithLibraryDecoder(half, halfFlags, halfFirst, new byte[131072]));
+
+            Assert.True(OodleBackend.TryEncodeBlock(new byte[262144], level,
+                out var full, out var fullMulti, out var fullFirst, out var fullFlags));
+            Assert.Equal(16, full.Length);
+            Assert.True(fullMulti);
+            Assert.Equal(8, fullFirst);
+            Assert.True(OodleBackend.VerifyWithLibraryDecoder(full, fullFlags, fullFirst, new byte[262144]));
+        }
+    }
+
+    /// <summary>
+    /// The zero route is guarded by "every byte is zero", so a block that is not entirely
+    /// zero must never reach it. A single non-zero byte at the very end of an otherwise
+    /// zero block is the tightest case: it is still hugely compressible, so the RAD path
+    /// succeeds, but it must not produce the 16-byte constant-run form.
+    /// </summary>
+    [SkippableFact]
+    public void ANearlyZeroBlockIsNotRoutedToTheBuiltInEncoder()
+    {
+        Skip.IfNot(OodleBackend.IsAvailable(null), OodleBackend.Describe(null));
+
+        var data = new byte[262144];
+        data[^1] = 0x5A;
+
+        Assert.True(OodleBackend.TryEncodeBlock(data, 7,
+            out var payload, out _, out var firstChunkCompSize, out var flags));
+        Assert.NotEqual(16, payload.Length);
+        Assert.True(OodleBackend.VerifyWithLibraryDecoder(payload, flags, firstChunkCompSize, data));
+    }
+
+    /// <summary>
     /// Describe() has two outputs: the encoder description when a RAD Oodle library resolves, and
     /// a "looked for …" diagnostic when none does. Only the first is asserted here, so this has to
     /// skip like every other test in this class when no library is present — otherwise the suite

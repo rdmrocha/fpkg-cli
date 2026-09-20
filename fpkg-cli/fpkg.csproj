@@ -80,8 +80,7 @@
        surfaces as a pile of CS0103s about variables that only exist inside those #ifs. Fail here
        with the actual cause instead. -->
   <Target Name="RequireLibXml" BeforeTargets="BeforeBuild">
-    <Error Condition="!Exists('$(LibXmlPath)')"
-           Text="LibProsperoPkg.xml not found at $(LibXmlPath). It sits beside LibProsperoPkg.dll in the release zip and is what the feature probes read; without it the CLI compiles as if built against the oldest supported release." />
+    <Error Condition="!Exists('$(LibXmlPath)')" Text="LibProsperoPkg.xml not found at $(LibXmlPath). It sits beside LibProsperoPkg.dll in the release zip and is what the feature probes read; without it the CLI compiles as if built against the oldest supported release." />
   </Target>
   <ItemGroup>
     <Reference Include="LibProsperoPkg">
@@ -110,6 +109,13 @@
     <ProjectReference Include="../PprPfsKrakenTool/PprPfsKrakenTool.csproj" />
     <ProjectReference Include="../tools/OodlePatcher/OodlePatcher.csproj" />
     <ProjectReference Include="../tools/VirtualSourcePatcher/VirtualSourcePatcher.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="TextureCompressor" Version="0.1.0" />
+    <PackageReference Include="TextureCompressor.Analysis" Version="0.1.0" />
+    <PackageReference Include="TextureCompressor.Codecs.BCnEncoder" Version="0.1.0" />
+    <PackageReference Include="TextureCompressor.FileFormats.Dds" Version="0.1.0" />
+    <PackageReference Include="TextureCompressor.FileFormats.Png" Version="0.1.0" />
   </ItemGroup>
 
 </Project>

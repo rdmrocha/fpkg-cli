@@ -81,6 +81,17 @@ public static class OodleBackend
         if (level < -4 || level > 9) return false;
         if (!IsAvailable(null)) return false;
 
+        // An all-zero block cannot be expressed by RAD's encoder in the form this
+        // container needs; LibProsperoPkg's own managed encoder computes it. See
+        // TryEncodeAllZeroBlock. Narrow by construction: an entirely-zero block only.
+        if (IsAllZero(data) &&
+            TryEncodeAllZeroBlock(data, level,
+                                  out payload, out multiChunk, out firstChunkCompSize, out boundaryFlags))
+        {
+            Interlocked.Increment(ref _builtInZeroBlocks);
+            return true;
+        }
+
         // Chunk 1 always matches back into chunk 0. Controller Ruling D: an INDEPENDENT
         // chunk 1 is not merely worse, it is undecodable - KrakenDecoder.DecodeBlock reads
         // slot 1 with withSeed:false, and an independent compress always produces a
@@ -99,11 +110,72 @@ public static class OodleBackend
     private static long _rawStoredChunks;
     private static long _encoderFailures;
     private static long _rejections;
+    private static long _builtInZeroBlocks;
+
+    /// <summary>
+    /// True when every byte of <paramref name="data"/> is zero.
+    /// </summary>
+    private static bool IsAllZero(ReadOnlySpan<byte> data) => !data.ContainsAnyExcept((byte)0);
+
+    /// <summary>
+    /// Encodes an all-zero block with LibProsperoPkg's built-in managed Kraken encoder
+    /// instead of RAD's, and adjudicates the result through the same library decoder every
+    /// other block passes.
+    ///
+    /// WHY. A PFS sub-chunk carries its own form out of band, in the boundary flag byte:
+    /// KrakenDecoder.DecodeBlock reads chunk 0's bit 0x02 and chunk 1's bit 0x20 as "this
+    /// sub-chunk is newLZ"; CLEAR selects DecodeBareEntropyBlock, i.e. the payload is a
+    /// single headerless Kraken_DecodeBytes array with no LZ table and no framing. The
+    /// canonical form of a constant run is exactly that: a five-byte entropy-array header
+    /// declaring a three-byte body, plus a three-byte one-symbol code-length transmission -
+    /// eight bytes per 128 KiB sub-chunk, every one of them computed from the sub-chunk
+    /// length and the repeated symbol (KrakenHuffmanArrayEncoder.BuildSingleSymbolArray
+    /// over BuildEntropyArray(chunkType: 2, srcSize: 3, dstSize: len)).
+    ///
+    /// RAD's Oodle cannot emit that. OodleLZ_Compress answers a zero run with an Oodle
+    /// FRAME - a two-byte stream header plus a memset quantum header - which is not a
+    /// headerless entropy array, so no (header, newLz, phase) split of it verifies in
+    /// NativeOodle.EncodeChunk's sweep and the half falls back to stored=2: 128 KiB on
+    /// disk instead of 8 bytes. That, and only that, is the +30 MB.
+    ///
+    /// The built-in encoder does emit it (OodleKrakenEncoder.EncodeSubChunk sees
+    /// IsConstantRun and takes ConstantRunArray), which for a 256 KiB zero block is a
+    /// 16-byte payload with FirstChunkCompSize 8 and boundary flags 0x44 - the shape the
+    /// library's NAPS reader recognises as a deduplicated zero span
+    /// (FirstChunkCompressedLength == 8, CompressedLength == 16, Even == 1, Odd == 1).
+    /// Nothing is hardcoded here; the bytes are computed by the library.
+    ///
+    /// Level: the built-in encoder builds a suffix trie at level 7 and above, which a
+    /// constant run never consults - EncodeSubChunk short-circuits on blockConstant before
+    /// touching the match tables - so the requested level is passed through unchanged and
+    /// the output does not depend on it.
+    /// </summary>
+    private static bool TryEncodeAllZeroBlock(ReadOnlySpan<byte> data, int level,
+        out byte[] payload, out bool multiChunk, out int firstChunkCompSize, out int boundaryFlags)
+    {
+        payload = Array.Empty<byte>();
+        multiChunk = false; firstChunkCompSize = 0; boundaryFlags = 0;
+
+        if (OodleKrakenEncoder.EncodeBlock(data, useHuffmanArrays: true, level,
+                allowSubLiterals: true, allowStoredHalves: true) is not { } block)
+            return false;
+
+        int first = block.MultiChunk ? block.FirstChunkCompSize : 0;
+        if (!VerifyWithLibraryDecoder(block.Payload, block.BoundaryFlags, first, data)) return false;
+
+        payload = block.Payload; multiChunk = block.MultiChunk;
+        firstChunkCompSize = first; boundaryFlags = block.BoundaryFlags;
+        return true;
+    }
 
     /// <summary>
     /// Diagnostics for the acceptance run; see Task 6. RawStoredChunks counts halves the
     /// shim could not verify and stored raw (stored == 2) - the frequency that decides
     /// whether the unhandled bare-entropy case (bit 0x40) is worth implementing.
+    /// BuiltInZeroBlocks counts blocks that were entirely zero and were therefore encoded
+    /// by LibProsperoPkg's built-in managed Kraken encoder rather than by RAD's - see
+    /// TryEncodeAllZeroBlock. A non-zero count means the build is MIXED: every other block
+    /// still came from RAD Oodle, and the backend still reports itself as the Oodle backend.
     /// EncoderFailures counts halves where the native encoder itself failed (stored == 3,
     /// comp &lt;= 0) - unlike RawStoredChunks and ordinary incompressible halves (stored == 1,
     /// uncounted), this is never expected to be non-zero and signals a broken Oodle SDK
@@ -111,9 +183,9 @@ public static class OodleBackend
     /// a block that was ultimately accepted (see TryEncodeWith) so a rejected block's halves
     /// are not double-reported here and in Rejections.
     /// </summary>
-    public static (long RawStoredChunks, long EncoderFailures, long Rejections) Counters()
+    public static (long RawStoredChunks, long EncoderFailures, long Rejections, long BuiltInZeroBlocks) Counters()
         => (Interlocked.Read(ref _rawStoredChunks), Interlocked.Read(ref _encoderFailures),
-            Interlocked.Read(ref _rejections));
+            Interlocked.Read(ref _rejections), Interlocked.Read(ref _builtInZeroBlocks));
 
     private static unsafe bool TryEncodeWith(ReadOnlySpan<byte> data, int level,
         out byte[] payload, out bool multiChunk, out int firstChunkCompSize, out int boundaryFlags)

@@ -1,5 +1,97 @@
 # Changelog
 
+## fpkg 0.6.9-fix1
+
+Fixes several defects in 0.6.9 against the same LibProsperoPkg 0.6.9. **Re-run `./fpkg patch` after
+updating** — this release adds four IL patch legs and will not behave correctly without them.
+
+### Titles that loaded to a black screen now boot
+
+A large multi-executable title built with every earlier release loaded and then black-screened. It
+now runs. Several independent defects contributed; each is described below, and any of them can
+affect other titles.
+
+Rebuild anything you care about. Packages from earlier releases are not repaired in place.
+
+### PlayGo layout is derived from the package, not computed
+
+The library sized language-chunk extents arithmetically while mapping every file to chunk 0, and
+nothing reconciled the two. On a large title that left real payload inside extents belonging to
+chunks the file map declares empty — in one case 84% of a boot executable.
+
+Extents are now derived by coalescing the measured layout, and the 31 one-mebibyte zero fillers the
+Windows SDK ships are staged so no real file can land in a language chunk. The fillers are placed
+last in the inner image, the final language extent covers its whole block, and the region past the
+last file becomes its own trailing extent — the same 33-extent shape the Windows toolkit produces.
+
+**The file→chunk map was also indexed wrongly.** `playgo-ficm.dat` is indexed by a file's slot in
+`playgo-hash-table.dat`, which is ordered by hash and not by file order. We wrote it in package
+order, so most files carried another file's chunk id — on one 52-file package, 45 of them,
+including the metadata an IL2CPP title cannot start without. Zero-length files now get a map entry too, one per
+file as the Windows output has.
+
+`playgo-scenario.json` is generated in the Windows toolkit's canonical form and written to both the
+CNT entry and the SI, instead of two different documents.
+
+### Executables are no longer modified
+
+`--sdk-version` now defaults to **`keep`**. The Windows toolkit does not restamp executables, and
+ours did: on a binary whose `.sceversion` table the library cannot locate, the restamp appended a
+duplicate record rather than rewriting one, corrupting the boot executable. When a version *is*
+requested, an executable that already carries its own record has it replaced in place.
+
+Separately, SELF binaries are now normalised the way the SDK's own generator does: where a
+binary's `.sceversion` trailer starts earlier than its header declares, it is moved onto the
+declared boundary, and a legacy PS4 magic is rewritten. `--no-self-normalize` opts out.
+
+### Source selection matches the SDK's generator
+
+File exclusion is applied to the whole tree with the SDK's own scoping rather than to `sce_sys`
+alone — `.gp4`, `.gp5` and `.esbak` at any depth, the generated `sce_sys` files at their own level,
+the `about/` subtree, root-only directories and exact paths. `keystone`, `pfs-version.dat` and the
+source `.dds` are deliberate exceptions and are documented as such.
+
+Directories are now walked **case-insensitively**, which is what decides the order files are laid
+out in; ordinal order put `Media/` ahead of `eboot.bin` and the SDK does not. The two generated
+`sce_sys` files lead the image in the SDK's order.
+
+The localised `sce_sys/icon0_NN.dds` the SDK generates from a dump's `icon0_NN.png` are now
+generated too — 13 missing package entries on a title that ships them. `--no-localised-icons` opts out.
+
+`sce_sys/about/right.sprx` is no longer synthesised. No Windows-built package contains it.
+`--keep-right-sprx` restores it.
+
+### Licence entries are stored in plaintext
+
+`license.dat`, `license.info`, `nptitle.dat`, `uds/npbind.dat` and `trophy2/npbind.dat` are stored
+unencrypted, as the Windows toolkit stores them. No build option reached this, so it is an IL patch.
+`--encrypt-license-entries` restores the old behaviour.
+
+### Faster
+
+Repairing PlayGo used to rehash every 64 KiB block of the package to rebuild the chunk CRC table —
+84 GiB of reads on a 90 GB title. It now reuses the entries below the CNT, which cannot have
+changed, and re-verifies a window of them before trusting any. Byte-identical output; on
+a 660 MB package, 61 MiB hashed instead of 631 MiB.
+
+### New IL patch legs
+
+`./fpkg patch` now applies sites 13–16 alongside the existing ones:
+
+- **13** — the five licence CNT entries, stored plaintext
+- **14** — suppress the synthesised `sce_sys/about/right.sprx`
+- **15** — place the language fillers last in the inner image, and lead with the two generated
+  `sce_sys` files in the SDK's order
+- **16** — walk directories case-insensitively
+
+### Flags
+
+Added: `--no-self-normalize`, `--no-localised-icons`, `--keep-right-sprx`,
+`--encrypt-license-entries`.
+
+Changed: `--sdk-version` defaults to `keep` (was `1`), which also stops a build lowering the
+source's `requiredSystemSoftwareVersion`.
+
 ## fpkg 0.6.9
 
 Tracks LibProsperoPkg 0.6.9. Re-run `./fpkg patch` after updating.
