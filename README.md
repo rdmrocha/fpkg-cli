@@ -4,7 +4,7 @@ Builds PS5 debug FPKG packages — and it does two things the official tooling d
 
 **It streams straight from a dump.** Point `--source` at a `.ffpfsc` container or a raw `.exfat` image captured off a PS5 and it builds from the file as it is: no extraction, no unpacking step, no second copy of a 600 GB tree on your disk. A materialised game folder works too, and produces a byte-identical package.
 
-**It runs on macOS and Linux**, arm64 or x64. The packaging engine is **LibProsperoPkg by Drakmor**; this is a command-line front end for it, because the official GUI is Windows-only WinForms and cannot run here.
+**It runs on macOS and Linux**, arm64 or x64. The packaging engine is **LibProsperoPkg by Drakmor**, reverse-engineered from Sony's own Windows publishing tools; this is a command-line front end for it, because the official GUI is Windows-only WinForms and cannot run here.
 
 This is **fpkg 0.6.9**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.9 belongs with a LibProsperoPkg 0.6.9 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
 
@@ -58,6 +58,29 @@ With the Oodle library in place (or not, if you skipped it), patch once:
 That rewrites `LibProsperoPkg.dll` into `LibProsperoPkg.patched.dll` and leaves the original untouched. `fpkg` prefers the patched copy and falls back to the stock one if the patch is missing or stale.
 
 Re-run `./fpkg patch` after **every** LibProsperoPkg update, and again if you add the Oodle library later. A patch built against a different release is refused, not silently used.
+
+### What the patches do
+
+The library was written for the Windows GUI and assumes a Windows toolchain. Sites 1–9 make it run
+off Windows and read a container source; sites 10–16 bring its output in line with what the
+official Windows tools produce.
+
+| # | Purpose |
+|---|---|
+| 1–3 | Read files from a container source (`.ffpfsc`, exFAT image) instead of a folder |
+| 4 | Fix a cached stream that breaks when reading plaintext blocks from a container |
+| 5–7 | Let the executable probes read from a container source too |
+| 8–9 | Let the SDK-version rewrite read the original executable from a container source |
+| 10 | Give each PlayGo language filler its own stored copy, as the Windows tools do |
+| 11–12 | Start each language filler on a 64 KiB boundary |
+| 13 | Store the licence and NP entries unencrypted, as the Windows tools do |
+| 14 | Stop the library inventing an `about/right.sprx` the Windows tools never ship |
+| 15 | Place the language fillers last in the image, as the Windows tools do |
+| 16 | Walk directories case-insensitively, matching the Windows file ordering |
+| Oodle | Route compression to your RAD Oodle Kraken library instead of Sony's Windows-only one |
+
+The Oodle leg is applied only when a library is present; `./fpkg patch --oodle` requests it
+explicitly and fails if there is none.
 
 ## Building
 

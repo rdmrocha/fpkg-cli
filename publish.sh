@@ -138,7 +138,6 @@ if find "$tools" -name 'LibProsperoPkg.dll' | grep -q .; then
 fi
 
 rm -f "$out"
-cp "$here/dist/README.md" "$here/README.md"
 # fpkg-tools/native/ is where the USER drops their own RAD Oodle library, so on any machine
 # that has actually used the Oodle backend it is not empty - and a plain `zip -r` of it
 # redistributes liboo2core*, which carries Unreal Engine EULA terms. Only README.txt is ever
@@ -146,7 +145,6 @@ cp "$here/dist/README.md" "$here/README.md"
 # allowlist cannot be defeated by a file name nobody predicted.
 (cd "$here" && zip -qr "$out" README.md fpkg fpkg-tools/bin \
      && zip -q "$out" fpkg-tools/native/README.txt)
-rm -f "$here/README.md"
 
 # Belt and braces: prove nothing licence-encumbered made it in, whatever is on disk.
 if unzip -l "$out" | grep -qiE 'oo2core|oo2net|oo2tex|libScePubTools|LibProsperoPkg'; then

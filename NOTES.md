@@ -60,7 +60,7 @@ The one thing you must supply is the RAD Oodle library itself, and only if you w
 
 ## Rebuild the distribution
 
-The zip bundles `dist/README.md` as its top-level `README.md` — that is the file an end user reads, so keep it current when flags or layout change. `NOTES.md` (this file) is the maintainer's record and is deliberately not shipped.
+`README.md` at the repository root is both the project README and the one bundled at the top level of the zip — that is the file an end user reads, so keep it current when flags or layout change. `NOTES.md` (this file) is the maintainer's record and is deliberately not shipped.
 
 
 ```sh

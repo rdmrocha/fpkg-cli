@@ -57,8 +57,6 @@ runtimes/
 # OodleUE SDK: Unreal Engine EULA terms, user-supplied.
 OodleUE*.zip
 
-# Staged into the zip by publish.sh from dist/README.md
-/README.md
 
 fpkg-cli.Tests/bin/
 fpkg-cli.Tests/obj/
