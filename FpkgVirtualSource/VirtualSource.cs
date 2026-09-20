@@ -39,7 +39,12 @@ public static class VirtualSource
     public static Stream OpenOrFile(string path) =>
         IsVirtual(path)
             ? Open(path)
-            : new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.RandomAccess);
+            // Not a plain FileStream: an executable that already carries the .sceversion record
+            // the library is about to write has that record hidden here, so the library's append
+            // lands on top of it instead of after it. See SceVersionTrailer. Identical to a
+            // FileStream for every path that is not registered, which is all of them unless an
+            // SDK override is set.
+            : SceVersionTrailer.OpenTrimmed(path);
 
     /// <summary>Files and directories directly beneath <paramref name="virtualRoot"/>, recursively.</summary>
     public static IEnumerable<VirtualEntry> Enumerate(string virtualRoot)

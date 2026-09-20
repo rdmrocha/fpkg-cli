@@ -4,6 +4,11 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
+using TextureCompressor.Bitmaps;
+using TextureCompressor.Colors;
+using TextureCompressor.FileFormats.Dds;
+using TextureCompressor.FileFormats.Png;
+using TextureCompressor.Formats;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -56,6 +61,8 @@ internal static class Program
                 // See the ordering note in PatchCommand.
                 "patch"  => PatchCommand.Run(args.Skip(1).ToArray()),
                 "api"    => Api(args),
+                "inner-list" => InnerListCommand(args),
+                "playgo-fix" => PlayGo.PlayGoFixCommand.Run(args, Fail, ParseFlags),
                 var cmd  => Fail($"unknown command '{cmd}' (try: fpkg help)"),
             };
         }
@@ -90,6 +97,31 @@ internal static class Program
                                         directory; --full also decodes every outer block,
                                         NAPS chunk and inner file. Exit 1 on any issue.
           fpkg api [filter]             list the library's public surface (substring filter)
+          fpkg playgo-fix <file.pkg> [--out <file.pkg>] [--passcode <32>] [--inspect]
+                                        rebuild a BUILT package's PlayGo metadata from its own
+                                        measured layout and reseal the CNT digest chain.
+                                        --inspect stops after the measurement and prints the
+                                        extents it would write. Normally reached through
+                                        `fpkg build --playgo-fix`, which also stages the
+                                        language fillers the derivation needs.
+          fpkg inner-list <file.pkg> [--sha256] [--filter <substr>] [--passcode <32>]
+                                     [--offsets] [--range A:B] [--tsv]
+                                        list every file inside the inner PFS — uncompressed
+                                        size, size on disk, and with --sha256 a digest of the
+                                        decoded contents. Streams: nothing is extracted and
+                                        peak memory does not grow with the package.
+                          --offsets     also give each file's byte range in the .pkg FILE,
+                                        measured from byte 0 of the package (so the 0x10000
+                                        FIH block is inside the origin) — the same space the
+                                        PlayGo extent table uses. Files whose bytes have no
+                                        such range (NAPS-compressed, shuffled, de-duplicated
+                                        zeros, or fragmented) report a reason instead of a
+                                        made-up number.
+                          --range A:B   list only files intersecting that .pkg byte range.
+                          --tsv         machine-readable output, one header row then one row
+                                        per file.
+                          --layout      print the package/NAPS/outer-PFS layout the offsets are
+                                        derived from, instead of the listing.
           fpkg patch [--oodle] [--ffpfsc]
                                         patch LibProsperoPkg in this folder. No flags applies
                                         every available patch: oodle (needs a RAD Oodle
@@ -152,14 +184,17 @@ internal static class Program
           --sdk-version <n|0xHEX|keep>
                                   SDK to stamp: a major generation (1-11, resolved to that
                                   release's canonical value) or a full 64-bit executable
-                                  identifier.                                  (default 1)
+                                  identifier.                               (default keep)
                                   Rewrites the .sceversion trailer in SELF binaries;
                                   param.json gets the canonical major/minor form.
+                                  An executable that already carries its own .sceversion
+                                  record has it REPLACED, not appended to.
                                   This ALSO SETS requiredSystemSoftwareVersion to the same
                                   version, which is how a dump demanding newer firmware than
-                                  you have gets brought down: with the default of 1 a build
-                                  declares firmware 1.00. "keep" leaves both the source's
-                                  sdkVersion and its firmware requirement untouched.
+                                  you have gets brought down: with --sdk-version 1 a build
+                                  declares firmware 1.00. "keep", the default, leaves both the
+                                  source's sdkVersion and its firmware requirement untouched,
+                                  which is what the Windows SDK toolkit does.
           --kraken-backend <name> Auto | Oodle | BuiltIn | Automatic |
                                   Uncompressed                                   (default Auto)
                                   Auto picks Oodle when the native backend is available and
@@ -191,6 +226,24 @@ internal static class Program
                                   costs about a second on a 650 MB package; a failure fails the
                                   build, though the package is still written so it can be
                                   inspected.
+          --no-playgo-fix         do NOT repair PlayGo. The repair is ON by default: it stages
+                                  the 31 playgo-languages/NN-xx-XX.bin fillers so every language
+                                  chunk owns a real file, block-aligns them, and derives the
+                                  extent table from the measured layout instead of computing it.
+                                  Without it the extent table disagrees with where files actually
+                                  are, which strands payload inside language chunks. It also
+                                  forces --no-coalescing and --no-relocation-align, because the
+                                  layout optimiser would otherwise reclaim the padding.
+          --playgo-filler-zeros   1 MiB of zeros per filler, byte-identical across all 31,
+                                  exactly as Sony's own generator writes them. This is the
+                                  DEFAULT; the flag only states it. It needs the
+                                  virtual-source patch, whose site 10 stops this library's
+                                  NAPS folding the 31 identical files onto one stored copy.
+          --playgo-filler-distinct
+                                  fill them with a 64 KiB incompressible per-language pattern
+                                  instead. The pre-site-10 fallback: it reaches the same
+                                  geometry without the patch, but it costs ~2 MB and the 31
+                                  files no longer decode to what Sony's do (drift #24/#25).
           --retain-sce-sys        keep every sce_sys file. By default license.*, playgo-*,
                                   origin-param.json and target-param.json are set aside for
                                   the build and put back afterwards: a retail dump's copies
@@ -208,6 +261,24 @@ internal static class Program
           --pfs-format <v2|v3>    PFS compression metadata format             (default v2)
           --entitlement-key <hex> 32 hex chars (16 bytes) for AC/AL dev licences
           --gp5 <file.gp5>        build from a GP5 project instead of a loose tree
+          --encrypt-license-entries
+                                  keep license.dat, license.info, nptitle.dat and the two
+                                  npbind.dat as ENCRYPTED CNT entries. They are stored in
+                                  plaintext by default, which is what the Windows SDK's
+                                  output does; this restores the library's own behaviour.
+          --no-self-normalize     do not normalise SELF executables. By default a binary whose
+                                  .sceversion trailer starts earlier than its own header
+                                  declares has the trailer moved to the declared boundary,
+                                  which is what the Windows SDK's generator does.
+          --no-localised-icons    do not generate the localised sce_sys/icon0_NN.dds. They are
+                                  generated by default from the icon0_NN.png a dump ships:
+                                  the Windows SDK's package carries a DDS entry for every
+                                  one of them (CNT id 4737+NN) and a dump carries none.
+          --keep-right-sprx       synthesise sce_sys/about/right.sprx, which the library does
+                                  from an embedded resource. It is suppressed by default:
+                                  neither Windows-built package contains it, and
+                                  the reference fixture's build log names it as an excluded
+                                  "reserved/SDK-generated sce_sys artifact".
           --no-coalescing         disable outer-block coalescing (on by default)
           --no-relocation-align   disable relocation alignment adjustment (on by default)
           --shuffle-analysis      evaluate every shuffle during compression (PFSv3 only).
@@ -719,6 +790,70 @@ internal static class Program
         using var _containerSource = containerSource;
 #endif
 
+        // --playgo-fix builds from a STAGING tree rather than the source: the 31 language fillers
+        // have to reach the inner PFS, and writing them into the user's folder is not this tool's
+        // to do. The tree mirrors directories and symlinks files, so it costs kilobytes on an 84 GB
+        // source; sce_sys is copied for real because the quarantine and the media repair both move
+        // files there. Done before the output-inside-source check so that check sees the tree the
+        // build will actually read.
+        // Default ON. The PlayGo layout/extent repair is the whole point of this release, so it
+        // is not something a user should have to remember to ask for; --no-playgo-fix opts out.
+        bool playGoFix = !flags.ContainsKey("no-playgo-fix");
+
+        // CNT parity, measured against the Windows-built package. Sony stores license.dat,
+        // license.info, nptitle.dat, uds/npbind.dat and trophy2/npbind.dat with Flags1 = 0; the
+        // library encrypts all five. Probing ProsperoCntEntryPolicy.Resolve across every volume
+        // type and applicationDrmType shows no build option reaches it, so IL site 13 does. ON by
+        // default because the oracle is the definition of correct here.
+        FpkgVirtualSource.CntEntryPolicy.PlaintextLicenseEntries =
+            !flags.ContainsKey("encrypt-license-entries");
+        // NEITHER Windows-built package contains sce_sys/about/right.sprx. the large title's lacks it,
+        // and so does the reference fixture's -- its build log names the exclusion outright:
+        //   "Excluded 12 service/project artifact(s):
+        //      sce_sys/about/right.sprx (reserved/SDK-generated sce_sys artifact)"
+        // The folder-to-GP5 wrapper drops the whole about/ directory and the packer writes only
+        // what the GP5 names. The library synthesises the file from an embedded resource instead,
+        // so quarantining the source directory does not remove it; site 14 stops it being made.
+        // ON by default, because both oracles agree.
+        FpkgVirtualSource.CntEntryPolicy.SuppressRightSprx = !flags.ContainsKey("keep-right-sprx");
+
+        // Fillers are written INTO the source folder and removed afterwards, the same contract
+        // the sce_sys quarantine and the media repair already use. No mirror, no hard links, no
+        // dependence on --temp-dir being on the source's volume.
+        PlayGo.PlayGoFillers.RecoverAbandoned(tempDir);
+        PlayGo.PlayGoFillers.Staged? playGoStage = null;
+        if (playGoFix)
+        {
+            // Sony's literal zeros are the default again. The incompressible per-language variant
+            // is kept behind --playgo-filler-distinct so the pre-site-10 behaviour can be
+            // recovered without rebuilding anything.
+            bool distinctFillers = flags.ContainsKey("playgo-filler-distinct");
+            if (distinctFillers && flags.ContainsKey("playgo-filler-zeros"))
+                return Fail("--playgo-filler-zeros and --playgo-filler-distinct ask for different " +
+                            "filler contents; pass at most one");
+#if HAS_VIRTUAL_SOURCE
+            // Zero fillers are byte-identical, so they are only usable with the dedup bypass the
+            // virtual-source patch carries. Without it all 31 would collapse onto one stored copy
+            // and the extent derivation would have nothing to measure. This is the same proxy the
+            // container-source path uses — it proves the loaded library carries the ffpfsc leg,
+            // which is the leg site 10 belongs to.
+            if (!distinctFillers && !VirtualSourcePatchLoaded())
+                return Fail("Sony's byte-identical zero fillers need the virtual-source patch " +
+                            "(site 10, the language-filler dedup bypass), which this LibProsperoPkg " +
+                            "does not carry. Run ./fpkg patch, or pass --playgo-filler-distinct to " +
+                            "use the incompressible per-language fillers instead.");
+#else
+            if (!distinctFillers)
+                return Fail("Sony's byte-identical zero fillers need the virtual-source patch " +
+                            "(site 10, the language-filler dedup bypass). Pass " +
+                            "--playgo-filler-distinct to use the incompressible fillers instead.");
+#endif
+            // source is UNCHANGED: the fillers land inside it and are removed on dispose.
+            playGoStage = PlayGo.PlayGoFillers.Stage(source, tempDir, distinctFillers,
+                                                     line => Console.WriteLine($"  {line}"),
+                                                     flags.ContainsKey("playgo-fillers-force"));
+        }
+
         // A PKG written inside the source tree would end up inside its own image.
         if (output.Equals(source, StringComparison.OrdinalIgnoreCase) ||
             (output + Path.DirectorySeparatorChar).StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -871,11 +1006,14 @@ internal static class Program
 #endif
 #if LIB_HAS_SDK_VERSIONS
         ulong? sdkVersion = null;
-        // Default "1", matching the 0.6.7 GUI's SDK combo (index 1 = SDK 1.00). 0.6.6 briefly
-        // defaulted to Auto; 0.6.7 reverted. "keep" is this CLI's escape hatch for leaving the
-        // source's own sdkVersion and .sceversion trailers alone — the GUI has no equivalent
-        // because its Auto entry (index 0) does exactly that.
-        var sdkText = flags.GetValueOrDefault("sdk-version", "1");
+        // Default "keep", which is what the Windows SDK toolkit does: its the large title package
+        // contains the source eboot.bin byte-for-byte, unrestamped. The 0.6.7 GUI defaults its SDK
+        // combo to index 1 (SDK 1.00) and this CLI followed it, but restamping mutates every
+        // executable in every folder build for no benefit, and on a SELF whose version table the
+        // library cannot locate it appends a duplicate record instead of rewriting one --
+        // see docs/eboot-trailer-duplication.md. "keep" leaves the source's own sdkVersion,
+        // requiredSystemSoftwareVersion and .sceversion trailers alone, matching the oracle.
+        var sdkText = flags.GetValueOrDefault("sdk-version", "keep");
         if (!string.IsNullOrWhiteSpace(sdkText)
             && !sdkText.Equals("keep", StringComparison.OrdinalIgnoreCase)
             && !sdkText.Equals("auto", StringComparison.OrdinalIgnoreCase))
@@ -903,6 +1041,16 @@ internal static class Program
             }
             else return Fail($"--sdk-version must be a major generation or 0xHEX: {sdkText}");
         }
+
+        // The restamp writes a .sceversion record for the module. When the library can locate the
+        // existing table it rewrites it in place; when it cannot -- which happens on a SELF whose
+        // table was added by an earlier external repair and is not described by its own headers --
+        // it appends instead, producing a second copy of the module's record. Hiding the record
+        // that is already there turns that append back into a replace. Folder sources only: a
+        // container source is passed through without per-file executable processing, which is why
+        // the .ffpfsc builds of this title never hit the defect.
+        if (sdkVersion is not null && Directory.Exists(source))
+            RegisterSceVersionTrailers(source);
 #else
         if (flags.ContainsKey("sdk-version"))
             return Fail("--sdk-version needs LibProsperoPkg 0.5 or newer");
@@ -987,8 +1135,17 @@ internal static class Program
             EntitlementKey = entitlementKey,
             SourceMode = gp5Path is null ? ProsperoSourceMode.Folder : ProsperoSourceMode.Gp5Project,
             ProjectFilePath = gp5Path,
-            EnableOuterBlockCoalescing = !flags.ContainsKey("no-coalescing"),
-            EnableRelocationAlignmentAdjustment = !flags.ContainsKey("no-relocation-align"),
+            // --playgo-fix implies both OFF. Site 12 pads each language filler onto its own
+            // 64 KiB block; that padding is slack, and reclaiming slack is exactly what the
+            // layout optimiser does -- with it on, the +1.97 MB pushes savings over the
+            // 1,048,576-byte threshold, ~558 MB is relocated and the padding is compacted out,
+            // leaving extents back at 64 bytes and a package WORSE than not patching at all.
+            // Measured free on their own: with the flags and no fillers, output is byte-identical
+            // to the plain baseline.
+            EnableOuterBlockCoalescing =
+                !flags.ContainsKey("no-coalescing") && !playGoFix,
+            EnableRelocationAlignmentAdjustment =
+                !flags.ContainsKey("no-relocation-align") && !playGoFix,
             EnableShufflePatternAnalysis = shuffleAnalysis,
 #endif
 #if LIB_HAS_SDK_VERSIONS
@@ -1144,6 +1301,42 @@ internal static class Program
             ? null
             : MediaRepair.Apply(tempDir, source, recoveryKey);
 
+        // Runs after media repair so every PNG it rebuilds is already in place. Sony's generator
+        // excludes every source .dds (RESERVED_SCE_SYS_SUFFIXES) and lets Publishing Tools
+        // re-encode from the PNG; a dump's .dds can be stale or outright wrong. the reference fixture ships
+        // pic0.dds and pic1.dds byte-identical while its pic0.png and pic1.png correctly differ,
+        // so passing the source .dds through packs the same image twice.
+        DdsRegen.RecoverAbandoned(tempDir, source, recoveryKey);
+        // OPT-IN. Re-encoding a 4K DDS costs ~30 s per file through Magick's single-threaded BC7
+        // path, and buys no parity: our BCn output does not match Sony's bit for bit either
+        // (drift #21), so the entry differs from the oracle whether we re-encode or not. It is
+        // only worth paying when a dump ships a DDS that is actually wrong -- the reference fixture has
+        // pic0.dds and pic1.dds byte-identical while the PNGs differ, so its pic1 artwork is
+        // simply the wrong image. `--regen-dds` repairs exactly those.
+        using var ddsRegen = flags.ContainsKey("no-media-repair") || flags.ContainsKey("keep-source-dds")
+            ? null
+            : DdsRegen.Apply(tempDir, source, recoveryKey, mediaRepair?.GeneratedNames);
+
+        // The localised icons. Sony's package carries icon0_NN.dds at CNT id 4737+NN for every
+        // icon0_NN.png the source ships -- measured on the large title: 13 PNGs (4609+NN) and 13 DDS
+        // (4737+NN), all thirteen ids matching with none left over. LibProsperoPkg emits a DDS
+        // entry only when the .dds FILE exists, and a dump ships only the PNGs, so we had the 13
+        // PNG entries and none of the DDS. Encoding the missing ones into the source for the
+        // duration of the build is what closes that gap.
+        // The Windows toolkit normalises every SELF before packaging: where a binary's
+        // .sceversion trailer starts earlier than its own header declares, the trailer is pushed
+        // forward to the declared boundary. Verified byte-for-byte against its output on
+        // the reference fixture's three repairable executables. See SelfNormalize.
+        SelfNormalizeStaging.RecoverAbandoned(tempDir, source, recoveryKey);
+        using var selfNormalize = flags.ContainsKey("no-self-normalize")
+            ? null
+            : SelfNormalizeStaging.Apply(tempDir, source, recoveryKey);
+
+        LocalisedIcons.RecoverAbandoned(tempDir, source, recoveryKey);
+        using var localisedIcons = flags.ContainsKey("no-localised-icons")
+            ? null
+            : LocalisedIcons.Apply(tempDir, source, recoveryKey);
+
         var result = ProsperoPackageBuilder.Build(options, quiet ? null : line => Console.WriteLine($"  {line}"));
 
         Console.WriteLine();
@@ -1172,18 +1365,45 @@ internal static class Program
         }
 
         // Native Oodle diagnostics, when the patched library and its backend are loaded.
+        // Emitted here, before the PlayGo derivation, because the counters are complete as
+        // soon as the build is: a derivation failure below must not swallow them.
         var backendType = AppDomain.CurrentDomain.GetAssemblies()
             .FirstOrDefault(a => a.GetName().Name == "PprPfsKrakenTool")
             ?.GetType("PprPfsKrakenTool.OodleBackend");
         if (backendType?.GetMethod("Counters")?.Invoke(null, null) is ITuple t)
         {
             Console.Error.WriteLine(
-                $"oodle: halves stored raw {t[0]}, encoder failures {t[1]}, blocks rejected {t[2]}");
+                $"oodle: halves stored raw {t[0]}, encoder failures {t[1]}, blocks rejected {t[2]}" +
+                (t.Length > 3 && t[3] is long zeroBlocks && zeroBlocks > 0
+                    ? $", all-zero blocks encoded by the built-in Kraken encoder {zeroBlocks}"
+                    : string.Empty));
             if (t[1] is long encoderFailures && encoderFailures > 0)
                 Console.Error.WriteLine(
                     $"WARNING: the native Oodle encoder failed on {encoderFailures} half(es); " +
                     "output for those halves was stored UNCOMPRESSED rather than silently " +
                     "degrading. Check the Oodle library in fpkg-tools/native/.");
+        }
+
+        if (playGoStage is not null)
+        {
+            Console.WriteLine();
+            // One line, on the normal output: a run where the count is not 31 — or where a filler
+            // arrived with de-duplication already off — is visible without reading the per-file
+            // notices site 10 emits during compression.
+            Console.WriteLine(FpkgVirtualSource.PlayGoFillerDedup.Summary());
+            if (FpkgVirtualSource.PlayGoFillerDedup.AlreadyDisabledCount != 0)
+                Console.Error.WriteLine(
+                    "WARNING: site 10 found a language filler whose caller had already disabled " +
+                    "de-duplication. The bypass did not override anything there, which means the " +
+                    "library now routes fillers through a call site this patch was not derived " +
+                    "against. Re-derive site 10 before trusting this package.");
+            Console.WriteLine("Deriving PlayGo metadata from the measured layout…");
+            int fixResult = PlayGo.PlayGoFixCommand.Run(
+                ["playgo-fix", result.OutputPath, "--passcode", passcode,
+                 "--default-language", PlayGo.PlayGoFillers.DefaultLanguageCode(recoveryKey)],
+                Fail, ParseFlags);
+            if (fixResult != 0) return fixResult;
+            playGoStage.Dispose();
         }
 
         return 0;
@@ -1264,10 +1484,63 @@ internal static class Program
     ///
     /// A quarantine abandoned by a killed process is drained on the next run.
     /// </summary>
-    private sealed class SceSysQuarantine : IDisposable
+    internal sealed class SceSysQuarantine : IDisposable
     {
-        private static readonly string[] Patterns =
-            ["license.*", "playgo-*", "origin-param.json", "target-param.json"];
+        // Sony's rules, transcribed from create-gp5-from-folder.py -- the folder-to-GP5 wrapper
+        // that decides what its packer ever sees. The SCOPES are not interchangeable and were
+        // measured, so each set says where it applies.
+
+        /// <summary>
+        /// <c>PROJECT_SUFFIXES</c>. Matched on the file name's LAST extension, case-insensitive,
+        /// at EVERY depth -- Sony tests this before any path or directory rule. This is the one
+        /// that removes <c>eboot.bin.esbak</c> at the tree root and
+        /// <c>sce_module/libc.prx.esbak</c>, neither of which a sce_sys-scoped sweep can reach.
+        /// </summary>
+        private static readonly string[] TreeWideSuffixes = [".gp4", ".gp5", ".esbak"];
+
+        /// <summary>
+        /// <c>GENERATED_SCE_SYS_FILES</c>, which Sony applies ONLY to the direct children of
+        /// <c>sce_sys/</c> (its test is <c>len(parts) == 2</c>). <c>license.*</c> is here for our
+        /// own reason as well: the builder only generates a fresh debug licence when the source
+        /// has neither, and otherwise packs the dump's retail licence, bound to another account.
+        /// <c>playgo-*</c> describes the OLD image layout and would win over the regenerated copy.
+        /// </summary>
+        private static readonly string[] SceSysGenerated =
+            ["license.dat", "license.info", "disc_info.dat", "ext_info.dat", "imagedigs.dat",
+             "playgo-chunk.dat", "playgo-hash-table.dat", "playgo-ficm.dat",
+             "playgo-scenario.json", "playgo-manifest.xml", "playgo-chunk.crc",
+             "pfsimage.xml", "pfs-region-hints.json", "param.sfo", "param_cp_values.json",
+             "pronunciation.sig", "origin-deltainfo.dat", "target-deltainfo.dat",
+             "origin-param.json", "target-param.json", "origin-relocinfo.dat",
+             "target-relocinfo.dat"];
+
+        /// <summary><c>GENERATED_SCE_SYS_DIRECTORIES</c>: the whole subtree, at any depth under
+        /// <c>sce_sys/</c>. <c>right.sprx</c> lives here and the library synthesises its own.</summary>
+        private static readonly string[] SceSysDirectories = ["about"];
+
+        /// <summary><c>GENERATED_ROOT_DIRECTORIES</c> plus the wrapper's own asset folder. Root
+        /// level ONLY -- a <c>sce_sc</c> nested deeper is a real game directory.</summary>
+        private static readonly string[] RootDirectories = ["sce_suppl", "sce_sc", ".gp5-assets"];
+
+        /// <summary><c>EXCLUDED_ROOT_FILES</c>: matched on the full relative path, so root only.</summary>
+        private static readonly string[] RootFiles = ["ampr_emu.index"];
+
+        /// <summary><c>EXCLUDED_FAKE_LIBRARIES</c>: matched on the full relative path.</summary>
+        private static readonly string[] ExactPaths =
+            ["fakelib/libsceampr.sprx", "fakelib/libsceplaygo.sprx"];
+
+        // NOT swept, deliberately, and these are departures from Sony's list:
+        //   keystone, pfs-version.dat  -- in GENERATED_SCE_SYS_FILES, but our builder REQUIRES the
+        //                                 source keystone and both appear as inner files in the
+        //                                 oracle, so sweeping them breaks the build and fixes
+        //                                 nothing.
+        //   RESERVED_SCE_SYS_SUFFIXES  -- Sony drops every .dds and .auth_info under sce_sys and
+        //   (.dds, .auth_info)            regenerates the textures from the PNGs. Our source .dds
+        //                                 already match the oracle's CNT entries byte-for-byte in
+        //                                 size, so dropping and re-encoding them would risk
+        //                                 content that currently agrees. The localised icons Sony
+        //                                 generates and we lacked are added instead, which reaches
+        //                                 the same observable package.
 
         // Keyed on recoveryKey — the ORIGINAL --source argument — not on the folder whose files
         // are being moved. Identical for a folder source. For a container source the folder is
@@ -1283,16 +1556,45 @@ internal static class Program
             return Path.Combine(backupDirectory, $"fpkg-scesys-{Convert.ToHexString(key)[..16]}");
         }
 
-        private static bool Matches(string fileName) => Patterns.Any(pattern =>
-            FileSystemName.MatchesSimpleExpression(pattern, fileName, ignoreCase: true));
+        /// <summary>
+        /// Whether a file at <paramref name="relativePath"/> (relative to the SOURCE ROOT, any
+        /// separator) is one Sony's generator never hands to the packer. Evaluated in Sony's own
+        /// order, because the scopes overlap.
+        /// </summary>
+        internal static bool Excluded(string relativePath)
+        {
+            string[] parts = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string name = parts[^1];
+            string posix = string.Join('/', parts);
 
-        private readonly string sceSys;
+            // 1. PROJECT_SUFFIXES — tree-wide, before anything else, on the last extension only.
+            if (TreeWideSuffixes.Contains(Path.GetExtension(name), StringComparer.OrdinalIgnoreCase))
+                return true;
+            // 2. tree-wide name suffix.
+            if (name.EndsWith(".playgo-scenario.json", StringComparison.OrdinalIgnoreCase))
+                return true;
+            // 3. root-level directories only.
+            if (parts.Length > 1 && RootDirectories.Contains(parts[0], StringComparer.OrdinalIgnoreCase))
+                return true;
+            // 4. and 5. exact relative paths.
+            if (RootFiles.Contains(posix, StringComparer.OrdinalIgnoreCase)) return true;
+            if (ExactPaths.Contains(posix, StringComparer.OrdinalIgnoreCase)) return true;
+            // 6. everything else is sce_sys-scoped.
+            if (!string.Equals(parts[0], "sce_sys", StringComparison.OrdinalIgnoreCase)) return false;
+            if (parts[1..^1].Any(p => SceSysDirectories.Contains(p, StringComparer.OrdinalIgnoreCase)))
+                return true;
+            // Direct children of sce_sys/ only — Sony's len(parts) == 2.
+            return parts.Length == 2
+                && SceSysGenerated.Contains(name, StringComparer.OrdinalIgnoreCase);
+        }
+
+        private readonly string root;
         private readonly string quarantine;
         private readonly bool active;
 
-        private SceSysQuarantine(string sceSys, string quarantine, bool active)
+        private SceSysQuarantine(string root, string quarantine, bool active)
         {
-            this.sceSys = sceSys;
+            this.root = root;
             this.quarantine = quarantine;
             this.active = active;
         }
@@ -1302,22 +1604,25 @@ internal static class Program
         {
             string quarantine = QuarantineFor(backupDirectory, recoveryKey);
             if (!Directory.Exists(quarantine)) return;
-            int restored = Restore(quarantine, Path.Combine(sourceFolder, "sce_sys"));
+            int restored = Restore(quarantine, sourceFolder);
             if (restored > 0)
-                Console.WriteLine($"  note:   restored {restored} sce_sys file(s) from an interrupted build");
+                Console.WriteLine($"  note:   restored {restored} source file(s) from an interrupted build");
         }
 
         internal static SceSysQuarantine Apply(string backupDirectory, string sourceFolder, string recoveryKey)
         {
-            string sceSys = Path.Combine(sourceFolder, "sce_sys");
+            // Rooted at the SOURCE, not at sce_sys: PROJECT_SUFFIXES is tree-wide, and
+            // eboot.bin.esbak and sce_module/libc.prx.esbak are the two files a sce_sys-scoped
+            // sweep provably cannot reach -- they were the extra inner files against the oracle.
+            string root = Path.GetFullPath(sourceFolder);
             string quarantine = QuarantineFor(backupDirectory, recoveryKey);
-            if (!Directory.Exists(sceSys)) return new SceSysQuarantine(sceSys, quarantine, active: false);
+            if (!Directory.Exists(root)) return new SceSysQuarantine(root, quarantine, active: false);
 
             var doomed = Directory
-                .EnumerateFiles(sceSys, "*", SearchOption.AllDirectories)
-                .Where(path => Matches(Path.GetFileName(path)))
+                .EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                .Where(path => Excluded(Path.GetRelativePath(root, path)))
                 .ToList();
-            if (doomed.Count == 0) return new SceSysQuarantine(sceSys, quarantine, active: false);
+            if (doomed.Count == 0) return new SceSysQuarantine(root, quarantine, active: false);
 
             Directory.CreateDirectory(quarantine);
             var moved = new List<string>();
@@ -1325,7 +1630,7 @@ internal static class Program
             {
                 foreach (string path in doomed)
                 {
-                    string relative = Path.GetRelativePath(sceSys, path);
+                    string relative = Path.GetRelativePath(root, path);
                     string target = Path.Combine(quarantine, relative);
                     Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                     File.Move(path, target, overwrite: true);
@@ -1334,23 +1639,24 @@ internal static class Program
             }
             catch (Exception)
             {
-                Restore(quarantine, sceSys);
+                Restore(quarantine, root);
                 throw;
             }
 
             moved.Sort(StringComparer.Ordinal);
             Console.WriteLine(
-                $"  sce_sys: set aside {moved.Count} stale file(s) for this build: {string.Join(", ", moved)}");
-            return new SceSysQuarantine(sceSys, quarantine, active: true);
+                $"  source: set aside {moved.Count} file(s) Sony's generator also excludes: " +
+                string.Join(", ", moved));
+            return new SceSysQuarantine(root, quarantine, active: true);
         }
 
-        private static int Restore(string quarantine, string sceSys)
+        private static int Restore(string quarantine, string root)
         {
             if (!Directory.Exists(quarantine)) return 0;
             int count = 0;
             foreach (string path in Directory.EnumerateFiles(quarantine, "*", SearchOption.AllDirectories))
             {
-                string target = Path.Combine(sceSys, Path.GetRelativePath(quarantine, path));
+                string target = Path.Combine(root, Path.GetRelativePath(quarantine, path));
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Move(path, target, overwrite: true);
                 count++;
@@ -1364,7 +1670,7 @@ internal static class Program
             if (!active) return;
             try
             {
-                Restore(quarantine, sceSys);
+                Restore(quarantine, root);
             }
             catch (Exception ex)
             {
@@ -1404,6 +1710,442 @@ internal static class Program
     /// the Magick dependency never comes up. That also means a merely MISSING pic1/pic2 is filled
     /// in here, pre-empting the library path entirely.
     /// </summary>
+    /// <summary>
+    /// Re-encodes sce_sys DDS media from its PNG, the way Sony's toolkit does.
+    /// <para>
+    /// `create-gp5-from-folder.py` lists `.dds` in RESERVED_SCE_SYS_SUFFIXES and never maps a
+    /// source copy, so Publishing Tools always re-encodes from the PNG. A dump's .dds is whatever
+    /// the ripper left behind: the reference fixture's pic0.dds and pic1.dds are byte-identical even though
+    /// pic0.png and pic1.png differ, so packing the source .dds ships one image twice.
+    /// </para>
+    /// The original .dds is set aside and restored afterwards; the source tree is never changed.
+    /// `--keep-source-dds` opts out. Skipped entirely under `--no-media-repair`.
+    /// </summary>
+    /// <summary>
+    /// Of two DDS files with identical bytes, returns the one whose PNG the shared image does NOT
+    /// match — i.e. the file carrying the wrong picture. Falls back to the second name only if the
+    /// comparison cannot be made, and says so.
+    /// </summary>
+    private static string? WrongOfPair(string sceSys, string ddsA, string ddsB)
+    {
+        // The PNGs are only the authority if they are sound. MediaRepair has already run and
+        // rebuilt any structurally-invalid PNG from its DDS, and those pairs are skipped before
+        // we get here -- but the COMPARISON PARTNER's png is not covered by that filter, and
+        // judging a DDS against a corrupt PNG would convict the wrong file.
+        string pngA = Path.Combine(sceSys, Path.ChangeExtension(ddsA, ".png"));
+        string pngB = Path.Combine(sceSys, Path.ChangeExtension(ddsB, ".png"));
+        foreach (string png in new[] { pngA, pngB })
+        {
+            string? why = !File.Exists(png) ? "missing"
+                        : PngCodec.IsValid(png, out string reason) ? null : reason;
+            if (why is not null)
+            {
+                Console.WriteLine($"  media:  {ddsA} and {ddsB} are identical, but " +
+                                  $"{Path.GetFileName(png)} is {why}, " +
+                                  "so which DDS is wrong cannot be decided from the PNGs. " +
+                                  "Leaving both as they are.");
+                return null;
+            }
+        }
+        try
+        {
+            var shared = TextureCompressor.FileFormats.Dds.DdsCodec.Decode(
+                Path.Combine(sceSys, ddsA));
+            double dA = MeanAbsDiff(shared, Path.Combine(sceSys, Path.ChangeExtension(ddsA, ".png")));
+            double dB = MeanAbsDiff(shared, Path.Combine(sceSys, Path.ChangeExtension(ddsB, ".png")));
+            // The larger distance is the stem whose own image is missing.
+            return dA >= dB ? ddsA : ddsB;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  media:  could not decide which of {ddsA}/{ddsB} is wrong " +
+                              $"({ex.GetType().Name}); repairing {ddsB}");
+            return ddsB;
+        }
+    }
+
+    private static double MeanAbsDiff(IBitmap<Rgba8UNorm> shared, string pngPath)
+    {
+        var other = TextureCompressor.FileFormats.Png.PngCodec.Decode(pngPath);
+        var m = TextureCompressor.Analysis.BitmapQuality.Compare(shared, other);
+        return m.RootMeanSquaredError;
+    }
+
+
+    /// <summary>
+    /// Encodes the localised icons Sony ships and a dump does not: for every
+    /// <c>sce_sys/icon0_NN.png</c> with no matching <c>icon0_NN.dds</c>, one is generated into the
+    /// source tree for the duration of the build and removed afterwards.
+    ///
+    /// <para><b>Why.</b> Sony's the large title package has 13 localised PNG entries (4609 + NN) AND 13
+    /// localised DDS entries (4737 + NN); ours had the PNGs and none of the DDS. LibProsperoPkg
+    /// emits an <c>ICON0_NN_DDS</c> entry only when the file is present in <c>sce_sys</c>, and a
+    /// retail dump ships the PNGs alone, so nothing produced them. Sony's own generator drops
+    /// every source <c>.dds</c> and re-encodes all of them from the PNGs; we generate only the
+    /// MISSING ones, which reaches the same set of package entries without re-encoding the base
+    /// textures that already agree with the oracle.</para>
+    ///
+    /// <para><b>In place, like the PlayGo fillers.</b> The alternative is mirroring the tree,
+    /// which on a 90 GB title means copying it. Created files are recorded in a marker so a killed
+    /// process's leftovers are cleaned on the next run, and nothing that was already there is ever
+    /// touched: a source that ships its own <c>icon0_NN.dds</c> keeps it.</para>
+    /// </summary>
+
+    /// <summary>
+    /// Applies <see cref="SelfNormalize"/> to every executable in the source tree for the duration
+    /// of the build: the original is moved aside and the repaired file written in its place, then
+    /// the original is moved back.
+    ///
+    /// <para>Sony's wrapper writes its normalised copies out of tree, into
+    /// <c>.gp5-assets/normalized-self/</c>, and points the GP5 at them. We have no manifest to
+    /// point anywhere, so the file has to be correct where the builder will read it. Same in-place
+    /// contract as the PlayGo fillers: the user's bytes are preserved, not rewritten, and an
+    /// interrupted run is drained on the next one.</para>
+    /// </summary>
+    private sealed class SelfNormalizeStaging : IDisposable
+    {
+        private readonly string _root, _backup;
+        private readonly List<string> _repaired;
+
+        private SelfNormalizeStaging(string root, string backup, List<string> repaired)
+        { _root = root; _backup = backup; _repaired = repaired; }
+
+        private static string BackupFor(string backupDirectory, string recoveryKey)
+        {
+            byte[] key = System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(Path.GetFullPath(recoveryKey)));
+            return Path.Combine(backupDirectory, $"fpkg-self-{Convert.ToHexString(key)[..16]}");
+        }
+
+        internal static void RecoverAbandoned(string backupDirectory, string sourceFolder, string recoveryKey)
+        {
+            string backup = BackupFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(backup)) return;
+            int restored = Restore(backup, Path.GetFullPath(sourceFolder));
+            if (restored > 0)
+                Console.WriteLine($"  note:   restored {restored} executable(s) from an interrupted build");
+        }
+
+        internal static SelfNormalizeStaging Apply(string backupDirectory, string sourceFolder,
+                                                   string recoveryKey)
+        {
+            string root = Path.GetFullPath(sourceFolder);
+            string backup = BackupFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(root)) return new SelfNormalizeStaging(root, backup, []);
+
+            var work = new List<(string Path, SelfNormalize.Plan Plan)>();
+            foreach (string path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            {
+                SelfNormalize.Plan? plan;
+                try { plan = SelfNormalize.PlanFor(path); }
+                catch (IOException) { continue; }
+                if (plan is { } p && p.ChangesAnything) work.Add((path, p));
+            }
+            if (work.Count == 0) return new SelfNormalizeStaging(root, backup, []);
+
+            Directory.CreateDirectory(backup);
+            var done = new List<string>();
+            try
+            {
+                foreach (var (path, plan) in work)
+                {
+                    string relative = Path.GetRelativePath(root, path);
+                    string saved = Path.Combine(backup, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(saved)!);
+                    // Move first, then write: the original is never overwritten in place, so a
+                    // crash at any point leaves it recoverable from the backup.
+                    File.Move(path, saved, overwrite: true);
+                    SelfNormalize.Write(saved, path, plan);
+                    done.Add(relative);
+                }
+            }
+            catch (Exception)
+            {
+                Restore(backup, root);
+                throw;
+            }
+
+            done.Sort(StringComparer.Ordinal);
+            Console.WriteLine($"  self:   normalised {done.Count} executable(s) the way the Windows " +
+                              $"SDK does: {string.Join(", ", done)}");
+            return new SelfNormalizeStaging(root, backup, done);
+        }
+
+        private static int Restore(string backup, string root)
+        {
+            if (!Directory.Exists(backup)) return 0;
+            int count = 0;
+            foreach (string path in Directory.EnumerateFiles(backup, "*", SearchOption.AllDirectories))
+            {
+                string target = Path.Combine(root, Path.GetRelativePath(backup, path));
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Move(path, target, overwrite: true);
+                count++;
+            }
+            Directory.Delete(backup, recursive: true);
+            return count;
+        }
+
+        public void Dispose()
+        {
+            if (_repaired.Count == 0) return;
+            try { Restore(_backup, _root); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"warning: could not restore the original executables: {ex.Message}");
+            }
+        }
+    }
+
+    private sealed class LocalisedIcons : IDisposable
+    {
+        private readonly List<string> _created;
+        private readonly string _marker;
+
+        private LocalisedIcons(List<string> created, string marker)
+        { _created = created; _marker = marker; }
+
+        private static string MarkerFor(string backupDirectory, string recoveryKey)
+        {
+            byte[] key = System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(Path.GetFullPath(recoveryKey)));
+            return Path.Combine(backupDirectory, $"fpkg-icons-{Convert.ToHexString(key)[..16]}.paths");
+        }
+
+        /// <summary>Deletes anything an interrupted build generated and left behind.</summary>
+        internal static void RecoverAbandoned(string backupDirectory, string sourceFolder, string recoveryKey)
+        {
+            string marker = MarkerFor(backupDirectory, recoveryKey);
+            if (!File.Exists(marker)) return;
+            int removed = 0;
+            foreach (string path in File.ReadAllLines(marker))
+                if (path.Length > 0 && File.Exists(path)) { File.Delete(path); removed++; }
+            File.Delete(marker);
+            if (removed > 0)
+                Console.WriteLine($"  note:   removed {removed} generated icon(s) from an interrupted build");
+        }
+
+        internal static LocalisedIcons Apply(string backupDirectory, string sourceFolder, string recoveryKey)
+        {
+            string sceSys = Path.Combine(sourceFolder, "sce_sys");
+            string marker = MarkerFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(sceSys)) return new LocalisedIcons([], marker);
+
+            // icon0_NN.png for NN in 00..30 -- the PlayGo language indices. Anything else named
+            // icon0_* is not one of Sony's localised icons and is left alone.
+            var todo = new List<(string Png, string Dds)>();
+            for (int n = 0; n <= 30; n++)
+            {
+                string png = Path.Combine(sceSys, $"icon0_{n:00}.png");
+                string dds = Path.Combine(sceSys, $"icon0_{n:00}.dds");
+                if (File.Exists(png) && !File.Exists(dds)) todo.Add((png, dds));
+            }
+            if (todo.Count == 0) return new LocalisedIcons([], marker);
+
+            var created = new List<string>();
+            try
+            {
+                var encoded = new byte[todo.Count][];
+                Parallel.For(0, todo.Count, i =>
+                {
+                    string scratch = Path.Combine(backupDirectory, $"fpkg-icon-{Guid.NewGuid():N}.dds");
+                    try
+                    {
+                        DdsCodec.Encode(
+                            TextureCompressor.FileFormats.Png.PngCodec.Decode(todo[i].Png), scratch,
+                            new DdsEncodingOptions { TextureFormat = TextureFormats.Bc7UNorm });
+                        encoded[i] = File.ReadAllBytes(scratch);
+                    }
+                    finally { if (File.Exists(scratch)) File.Delete(scratch); }
+                });
+
+                // The marker is written BEFORE the files, so a crash between the two leaves a
+                // marker naming files that do not exist -- harmless -- rather than files with no
+                // marker, which would be left in the user's source tree.
+                File.WriteAllLines(marker, todo.Select(t => t.Dds));
+                for (int i = 0; i < todo.Count; i++)
+                {
+                    File.WriteAllBytes(todo[i].Dds, encoded[i]);
+                    created.Add(todo[i].Dds);
+                }
+            }
+            catch
+            {
+                foreach (string path in created) if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(marker)) File.Delete(marker);
+                throw;
+            }
+
+            Console.WriteLine($"  icons:  generated {created.Count} localised icon0_NN.dds from the " +
+                              "source PNGs (Sony ships these; a dump does not)");
+            return new LocalisedIcons(created, marker);
+        }
+
+        public void Dispose()
+        {
+            foreach (string path in _created)
+                try { if (File.Exists(path)) File.Delete(path); }
+                catch (IOException ex) { Console.Error.WriteLine($"warning: could not remove {path}: {ex.Message}"); }
+            try { if (File.Exists(_marker)) File.Delete(_marker); } catch (IOException) { }
+        }
+    }
+
+    private sealed class DdsRegen : IDisposable
+    {
+        private static readonly string[] Pairs = ["icon0", "pic0", "pic1", "pic2"];
+
+        private readonly string _sceSys, _folder;
+        private readonly List<string> _replaced;
+        private readonly bool _active;
+
+        private DdsRegen(string sceSys, string folder, List<string> replaced, bool active)
+        { _sceSys = sceSys; _folder = folder; _replaced = replaced; _active = active; }
+
+        private static string FolderFor(string backupDirectory, string recoveryKey)
+        {
+            byte[] key = System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(Path.GetFullPath(recoveryKey)));
+            return Path.Combine(backupDirectory, $"fpkg-ddsregen-{Convert.ToHexString(key)[..16]}");
+        }
+
+        internal static void RecoverAbandoned(string backupDirectory, string sourceFolder, string recoveryKey)
+        {
+            string folder = FolderFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(folder)) return;
+            string sceSys = Path.Combine(sourceFolder, "sce_sys");
+            foreach (string path in Directory.EnumerateFiles(folder))
+                File.Move(path, Path.Combine(sceSys, Path.GetFileName(path)), overwrite: true);
+            Directory.Delete(folder, recursive: true);
+        }
+
+        internal static DdsRegen Apply(string backupDirectory, string sourceFolder, string recoveryKey,
+                                       IReadOnlyCollection<string>? pngsRebuiltFromDds = null)
+        {
+            string sceSys = Path.Combine(sourceFolder, "sce_sys");
+            string folder = FolderFor(backupDirectory, recoveryKey);
+            if (!Directory.Exists(sceSys)) return new DdsRegen(sceSys, folder, [], active: false);
+
+            // Only a DDS that is demonstrably WRONG is re-encoded. Re-encoding a sound one buys
+            // nothing: our BCn output does not match Sony's bit for bit either (drift #21), so it
+            // would cost seconds per file and still differ from the oracle. The defect actually
+            // present in dumps is a duplicate -- the reference fixture ships pic0.dds and pic1.dds
+            // byte-identical while the PNGs differ -- so that is what we repair.
+            var digests = new Dictionary<string, string>(StringComparer.Ordinal);
+            var duplicated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string stem in Pairs)
+            {
+                string d = Path.Combine(sceSys, stem + ".dds");
+                if (!File.Exists(d)) continue;
+                string hash = Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(d)));
+                if (digests.TryGetValue(hash, out string? first))
+                {
+                    // Both copies are suspect and ORDER PROVES NOTHING about which is wrong.
+                    // Decide it on evidence: decode the shared DDS once and compare it against
+                    // each stem's own PNG. The stem whose PNG the image does NOT match is the
+                    // one carrying the wrong picture. On the reference fixture the shared image matches
+                    // pic1.png exactly (RGB rmse 0.000) and pic0.png only loosely (rmse 0.898),
+                    // so pic0.dds is the defective file -- the opposite of what "repair the
+                    // later one" would have picked.
+                    if (WrongOfPair(sceSys, first, stem + ".dds") is string wrong)
+                        duplicated.Add(wrong);
+                }
+                else digests[hash] = stem + ".dds";
+            }
+
+            var work = new List<(string Dds, string Png)>();
+            foreach (string stem in Pairs)
+            {
+                string png = Path.Combine(sceSys, stem + ".png");
+                string dds = Path.Combine(sceSys, stem + ".dds");
+                // Only when both exist and the PNG is sound: a PNG-less .dds is the only copy of
+                // that image and must be packed as it is.
+                // Never re-encode a DDS from a PNG that was itself rebuilt from that same DDS:
+                // the round trip is lossy, so we would replace a good DDS with a worse copy.
+                if (pngsRebuiltFromDds is not null
+                    && pngsRebuiltFromDds.Contains(stem + ".png", StringComparer.OrdinalIgnoreCase))
+                    continue;
+                if (!duplicated.Contains(stem + ".dds")) continue;
+                if (File.Exists(png) && File.Exists(dds) && PngCodec.IsValid(png, out _))
+                    work.Add((dds, png));
+            }
+            if (work.Count == 0) return new DdsRegen(sceSys, folder, [], active: false);
+
+            Directory.CreateDirectory(folder);
+            var replaced = new List<string>();
+            try
+            {
+                // One core per file: the encoder itself is single-threaded, so the only
+                // parallelism available is across files.
+                var encoded = new byte[work.Count][];
+                Parallel.For(0, work.Count, i =>
+                {
+                    // TextureCompressor, not the library's own EncodePngToDds: that path needs
+                    // Magick.NET, whose single-threaded BC7 takes ~30 s on a 4K image. This is
+                    // ~2.2 s and produces the identical container -- DX10 header, BC7_UNORM
+                    // (dxgiFormat 98), resourceDimension 3, and the exact same byte length.
+                    // MipmapMode.None: the source has one level, and Generate would fabricate a
+                    // 12-level chain that Sony does not ship (+2.7 MB on pic0 alone).
+                    string scratch = Path.Combine(backupDirectory,
+                        $"fpkg-dds-{Guid.NewGuid():N}.dds");
+                    try
+                    {
+                        DdsCodec.Encode(TextureCompressor.FileFormats.Png.PngCodec.Decode(work[i].Png), scratch,
+                                        new DdsEncodingOptions { TextureFormat = TextureFormats.Bc7UNorm });
+                        encoded[i] = File.ReadAllBytes(scratch);
+                    }
+                    finally { if (File.Exists(scratch)) File.Delete(scratch); }
+                });
+
+                for (int i = 0; i < work.Count; i++)
+                {
+                    var (dds, png) = work[i];
+                    byte[] rebuilt = encoded[i];
+                    string name = Path.GetFileName(dds);
+                    if (rebuilt.AsSpan().SequenceEqual(File.ReadAllBytes(dds))) continue;
+                    File.Move(dds, Path.Combine(folder, name), overwrite: true);
+                    File.WriteAllBytes(dds, rebuilt);
+                    replaced.Add(name);
+                    Console.WriteLine($"  media:  {name} re-encoded from {Path.GetFileName(png)} " +
+                                      $"({rebuilt.Length:N0} bytes)");
+                }
+            }
+            catch (Exception)
+            {
+                RestoreInto(folder, sceSys);
+                throw;
+            }
+            if (replaced.Count == 0)
+            {
+                Directory.Delete(folder, recursive: true);
+                return new DdsRegen(sceSys, folder, [], active: false);
+            }
+            return new DdsRegen(sceSys, folder, replaced, active: true);
+        }
+
+        private static void RestoreInto(string folder, string sceSys)
+        {
+            if (!Directory.Exists(folder)) return;
+            // The tree we edited can be a staging copy (--playgo-fix builds one) that is already
+            // gone by the time we dispose. Nothing to restore into, and nothing to preserve.
+            if (!Directory.Exists(sceSys)) { Directory.Delete(folder, recursive: true); return; }
+            foreach (string path in Directory.EnumerateFiles(folder))
+                File.Move(path, Path.Combine(sceSys, Path.GetFileName(path)), overwrite: true);
+            Directory.Delete(folder, recursive: true);
+        }
+
+        public void Dispose()
+        {
+            if (!_active) return;
+            foreach (string name in _replaced)
+            {
+                string live = Path.Combine(_sceSys, name);
+                try { if (File.Exists(live)) File.Delete(live); } catch (DirectoryNotFoundException) { }
+            }
+            RestoreInto(_folder, _sceSys);
+        }
+    }
+
     private sealed class MediaRepair : IDisposable
     {
         // Every sce_sys PNG the library will pack as a CNT entry that also has a DDS sibling.
@@ -1425,6 +2167,10 @@ internal static class Program
         private readonly string folder;
         private readonly List<string> generated;
         private readonly bool active;
+
+        /// <summary>PNGs this repair rebuilt FROM a .dds. DdsRegen must not re-encode those
+        /// back into the .dds they came from — the round trip is lossy.</summary>
+        internal IReadOnlyCollection<string> GeneratedNames => generated;
 
         private MediaRepair(string sceSys, string folder, List<string> generated, bool active)
         {
@@ -1715,6 +2461,46 @@ internal static class Program
     private record SourceMetadata(string? ContentId, string? Version, string? Title);
 
     /// <summary>Pulls content id, version and title out of sce_sys/param.json, as the GUI does on folder selection.</summary>
+
+    /// <summary>
+    /// Registers every executable under <paramref name="source"/> that already carries a
+    /// <c>.sceversion</c> record naming itself, so the library's restamp replaces that record
+    /// rather than appending a second one. See
+    /// <see cref="FpkgVirtualSource.SceVersionTrailer"/> and docs/eboot-trailer-duplication.md.
+    /// </summary>
+    private static void RegisterSceVersionTrailers(string source)
+    {
+        FpkgVirtualSource.SceVersionTrailer.Reset();
+        string[] extensions = [".bin", ".elf", ".prx", ".sprx", ".self"];
+        foreach (var path in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            if (!extensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
+                continue;
+            if (!LooksLikeExecutable(path)) continue;
+            FpkgVirtualSource.SceVersionTrailer.Register(path);
+        }
+    }
+
+    /// <summary>
+    /// A cheap magic check, so a data file that happens to end in bytes shaped like a
+    /// <c>.sceversion</c> record can never be trimmed. PS5 SELF, PS4 SELF and bare ELF.
+    /// </summary>
+    private static bool LooksLikeExecutable(string path)
+    {
+        Span<byte> magic = stackalloc byte[4];
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1,
+                                          FileOptions.SequentialScan);
+            if (fs.Length < 4 || fs.Read(magic) != 4) return false;
+        }
+        catch (IOException) { return false; }
+        uint m = BitConverter.ToUInt32(magic);
+        return m == 0xEEF51454u    // PS5 SELF
+            || m == 0x1D3D154Fu    // PS4 SELF
+            || m == 0x464C457Fu;   // ELF
+    }
+
     private static SourceMetadata ReadSourceMetadata(string source)
     {
         var paramJson = Path.Combine(source, "sce_sys", "param.json");
@@ -1881,6 +2667,87 @@ internal static class Program
                $"{Math.Max(1, blocks)} or fewer.";
     }
 #endif
+
+    /// <summary>
+    /// Prints one line per inner file as it is produced, rather than collecting the listing and
+    /// printing at the end: on an 88 GB package with --sha256 the run is measured in hours, and a
+    /// tool that prints nothing until it finishes is indistinguishable from one that has hung.
+    /// </summary>
+    private static int InnerListCommand(string[] args)
+    {
+        if (args.Length < 2) return Fail("inner-list needs a package path");
+        var flags = ParseFlags(args[1..]);
+        string path = Path.GetFullPath(args[1]);
+        if (!File.Exists(path)) return Fail($"no such file: {path}");
+        string passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
+        bool sha = flags.ContainsKey("sha256");
+        string? filter = flags.GetValueOrDefault("filter");
+
+        if (flags.ContainsKey("layout"))
+        {
+            Console.WriteLine(InnerList.DescribeLayout(path, passcode,
+                flags.TryGetValue("spans-from", out var from) && long.TryParse(from, out var at) ? at : -1));
+            return 0;
+        }
+        bool tsv = flags.ContainsKey("tsv");
+        bool offsets = flags.ContainsKey("offsets");
+        (long, long)? range = flags.TryGetValue("range", out var spec) ? ParseRange(spec) : null;
+
+        if (tsv)
+            Console.WriteLine("path\tsize\tphysical_size\tcompressed\tsha256\tinner_offset\t" +
+                              "pkg_start\tpkg_end\tmap_note\tpkg_span_start\tpkg_span_end\tspan_note");
+        long files = 0, bytes = 0, mapped = 0;
+        var untestable = new System.Runtime.CompilerServices.StrongBox<long>(0);
+        foreach (var e in InnerList.Enumerate(path, passcode, sha, filter, offsets, range,
+                                              default, untestable))
+        {
+            if (tsv)
+                Console.WriteLine(string.Join('\t',
+                    e.Path, e.Size, e.PhysicalSize, e.Compressed ? 1 : 0, e.Sha256 ?? "",
+                    e.InnerOffset, e.PkgStart, e.PkgEnd, e.MapNote ?? "",
+                    e.PkgSpanStart, e.PkgSpanEnd, e.SpanNote ?? ""));
+            else if (offsets || range is not null)
+                Console.WriteLine($"{e.Sha256 ?? "-",-64} {e.Size,14} {e.PhysicalSize,14} " +
+                                  $"{(e.Compressed ? "z" : "-")} {e.PkgStart,13} {e.PkgEnd,13} " +
+                                  $"{e.MapNote ?? "-",-22} {e.PkgSpanStart,13} {e.PkgSpanEnd,13} " +
+                                  $"{e.Path}");
+            else
+                Console.WriteLine($"{e.Sha256 ?? "-",-64} {e.Size,14} {e.PhysicalSize,14} " +
+                                  $"{(e.Compressed ? "z" : "-")} {e.Path}");
+            Console.Out.Flush();
+            files++;
+            bytes += e.Size;
+            if (e.MapNote is null && e.PkgStart >= 0) mapped++;
+        }
+        // stderr, so a listing can be piped or diffed without the summary landing in it.
+        Console.Error.WriteLine($"{files} file(s), {bytes:N0} bytes uncompressed" +
+            (offsets || range is not null ? $", {mapped} placed in the package" : ""));
+        // An empty --range result only means "nothing is there" if this is zero.
+        if (range is not null && untestable.Value > 0)
+            Console.Error.WriteLine(
+                $"WARNING: {untestable.Value} file(s) have no mappable footprint and were NOT " +
+                "tested against the range. An empty or short result is not evidence of absence.");
+        if (offsets || range is not null)
+            Console.Error.WriteLine(
+                "offsets are absolute, from byte 0 of the .pkg file (the 0x10000 FIH block is " +
+                "inside this origin). pkg_start/pkg_end is the file's bytes verbatim and exists " +
+                "only where NAPS stored them uncompressed; pkg_span_start/pkg_span_end is the " +
+                "footprint of the NAPS spans holding the file, a superset where present " +
+                "shared with its neighbours. --range tests the span footprint.");
+        return 0;
+    }
+
+    /// <summary>Parses <c>--range A:B</c> into a half-open [A, B) .pkg byte range.</summary>
+    private static (long, long) ParseRange(string? spec)
+    {
+        var parts = (spec ?? "").Split(':');
+        if (parts.Length != 2
+            || !long.TryParse(parts[0].Replace("_", ""), out var a)
+            || !long.TryParse(parts[1].Replace("_", ""), out var b)
+            || a < 0 || b < a)
+            throw new ArgumentException($"--range wants START:END in bytes, got '{spec}'");
+        return (a, b);
+    }
 
     private static int Api(string[] args)
     {
