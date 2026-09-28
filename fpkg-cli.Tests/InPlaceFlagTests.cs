@@ -34,7 +34,8 @@ public class InPlaceFlagTests(ITestOutputHelper output)
     {
         string source = TinySource();
         var (exit, log) = SyntheticPackage.RunFpkg(
-            ["build", "--source", source, "--out", FreshOut("default")]);
+            ["build", "--source", source, "--out", FreshOut("default"),
+             "--temp-dir", FreshOut("default-temp")]);
         output.WriteLine(log);
 
         Assert.Equal(0, exit);
@@ -46,13 +47,22 @@ public class InPlaceFlagTests(ITestOutputHelper output)
     {
         string source = TinySource();
         var (exit, log) = SyntheticPackage.RunFpkg(
-            ["build", "--source", source, "--out", FreshOut("spool"), "--spool"]);
+            ["build", "--source", source, "--out", FreshOut("spool"),
+             "--temp-dir", FreshOut("spool-temp"), "--spool"]);
         output.WriteLine(log);
 
         Assert.Equal(0, exit);
         Assert.DoesNotContain("Single-file build", log);
     }
 
+    /// <summary>
+    /// Every build here gets its own --temp-dir. Concurrent builds sharing one temp directory
+    /// interfere through the abandoned-staging recovery the CLI runs at startup, which scans that
+    /// directory for another build's records; the symptom is a PlayGo filler vanishing mid-build
+    /// ("no extent was derived for language chunk 1"). That is pre-existing CLI behaviour, not
+    /// something the single-file build introduced, but these tests are what made it reachable
+    /// from the suite.
+    /// </summary>
     private static string FreshOut(string tag)
     {
         string dir = Path.Combine(Path.GetTempPath(), $"ip-flag-{tag}-{Guid.NewGuid():N}");
