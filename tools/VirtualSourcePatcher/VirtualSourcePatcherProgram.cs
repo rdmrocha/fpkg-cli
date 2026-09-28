@@ -136,6 +136,10 @@ public static class VirtualSourcePatcherProgram
                 Sites.Method(Sites.Type(module, "LibProsperoPkg.PFS.ProsperoOuterFileSource"),
                              "OpenRead", "System.IO.Stream", 0),
                 shim);
+            Rewrites.InPlaceSpoolRedirect(
+                Sites.Method(builder, "BuildPublisherImage", "System.Void", 7),
+                Sites.Method(builder, "TryDeleteTemp", "System.Void", 1),
+                shim);
 
             module.Write(output);
             Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, " +

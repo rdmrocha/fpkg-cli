@@ -1727,4 +1727,150 @@ internal static class Rewrites
         Sites.Expect(found >= 0, $"{what} does not call BuildFileIO.Open");
         return found;
     }
+
+    /// <summary>
+    /// Site 17. The one switch. Stage 1's spool path becomes
+    /// <c>InPlaceImage.SpoolPathFor(spool, output, prepositioned)</c>, which returns a
+    /// <c>fpkgwin:</c> window into the final package when the CLI has enabled the single-file
+    /// build AND the outer PFS is already prepositioned there — the only configuration in which
+    /// the plaintext lands where stage 3 is going to read it.
+    ///
+    /// <para>The call is inserted right after the prepositioned-output local is assigned, which is
+    /// the first point at which all three arguments are live. Cleanup is guarded separately:
+    /// <c>TryDeleteTemp</c> must never act on a window path, because the file behind it is the
+    /// package the build just produced.</para>
+    ///
+    /// <para>Inert when disabled: <c>SpoolPathFor</c> returns its first argument unchanged and
+    /// <c>TryDeleteWindow</c> returns false, so the original body runs.</para>
+    /// </summary>
+    internal static void InPlaceSpoolRedirect(MethodDef buildPublisherImage, MethodDef tryDeleteTemp,
+                                              Sites.Shim shim)
+    {
+        var instructions = buildPublisherImage.Body.Instructions;
+
+        Local spool = FindStringLocalAfter(instructions, ".pfs_image.dat", buildPublisherImage);
+        (Local output, int assigned) = FindPrepositionedOutputLocal(instructions, buildPublisherImage);
+        Local prepositioned = FindPrepositionedFlag(instructions, buildPublisherImage);
+
+        ExpectNotTargeted(buildPublisherImage, instructions, assigned + 1, 1,
+            "the instruction after the prepositioned-output assignment");
+
+        var redirect = new[]
+        {
+            OpCodes.Ldloc.ToInstruction(spool),
+            OpCodes.Ldloc.ToInstruction(output),
+            OpCodes.Ldloc.ToInstruction(prepositioned),
+            OpCodes.Call.ToInstruction(shim.InPlaceSpoolPath),
+            OpCodes.Stloc.ToInstruction(spool),
+        };
+        for (int i = 0; i < redirect.Length; i++)
+            instructions.Insert(assigned + 1 + i, redirect[i]);
+        buildPublisherImage.Body.UpdateInstructionOffsets();
+
+        GuardTempDelete(tryDeleteTemp, shim);
+    }
+
+    /// <summary>The local a "&lt;stem&gt; + suffix" concatenation is stored into.</summary>
+    private static Local FindStringLocalAfter(IList<Instruction> instructions, string suffix,
+                                              MethodDef method)
+    {
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            if (instructions[i].OpCode != OpCodes.Ldstr ||
+                (instructions[i].Operand as string) != suffix) continue;
+
+            // ldstr <suffix>; call String::Concat; stloc <local>
+            Sites.Expect(i + 2 < instructions.Count, $"\"{suffix}\" is at the end of the method");
+            Sites.Expect(instructions[i + 1].OpCode == OpCodes.Call &&
+                         instructions[i + 1].Operand is IMethod c &&
+                         c.FullName.Contains("System.String::Concat", StringComparison.Ordinal),
+                $"\"{suffix}\" is not concatenated onto the temp stem");
+            var store = instructions[i + 2];
+            Sites.Expect(store.Operand is Local,
+                $"the \"{suffix}\" path is not stored in a local");
+            return (Local)store.Operand;
+        }
+        throw new InvalidOperationException(
+            $"shape check failed: {method.Name} does not build a \"{suffix}\" path. Upstream IL " +
+            "has changed; re-derive the patch against the new release before shipping it.");
+    }
+
+    /// <summary>
+    /// The local holding the outer-PFS output path, and the index of its assignment. It is the
+    /// store that both arms of the staging/prepositioned ternary converge on.
+    /// </summary>
+    private static (Local Local, int Index) FindPrepositionedOutputLocal(
+        IList<Instruction> instructions, MethodDef method)
+    {
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            if (instructions[i].OpCode != OpCodes.Ldstr ||
+                (instructions[i].Operand as string) != ".outer.pfs") continue;
+
+            // ldstr ".outer.pfs"; call Concat; br; <prepositioned arm>; stloc <local>
+            int store = i;
+            while (store < instructions.Count && !(instructions[store].Operand is Local &&
+                   instructions[store].OpCode.Name.StartsWith("stloc", StringComparison.Ordinal)))
+                store++;
+            Sites.Expect(store < instructions.Count,
+                "the outer-PFS output ternary does not end in a store");
+            Sites.Expect(instructions[store - 1].OpCode == OpCodes.Call &&
+                         instructions[store - 1].Operand is IMethod g &&
+                         g.FullName.Contains("System.IO.Path::GetFullPath", StringComparison.Ordinal),
+                "the prepositioned arm of the outer-PFS output ternary does not end in " +
+                "Path.GetFullPath; the two arms may have swapped");
+            return ((Local)instructions[store].Operand, store);
+        }
+        throw new InvalidOperationException(
+            "shape check failed: BuildPublisherImage does not build a \".outer.pfs\" staging path. " +
+            "Upstream IL has changed; re-derive the patch against the new release before shipping it.");
+    }
+
+    /// <summary>The bool local set from !IsNullOrWhiteSpace(PrepositionedFihOutputPath).</summary>
+    private static Local FindPrepositionedFlag(IList<Instruction> instructions, MethodDef method)
+    {
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            if (!(instructions[i].Operand is IMethod m &&
+                  m.Name.String == "get_PrepositionedFihOutputPath")) continue;
+            if (!(instructions[i + 1].Operand is IMethod n &&
+                  n.FullName.Contains("String::IsNullOrWhiteSpace", StringComparison.Ordinal)))
+                continue;
+
+            // ...; ldc.i4.0; ceq; stloc <flag>
+            int store = i + 2;
+            while (store < instructions.Count &&
+                   !instructions[store].OpCode.Name.StartsWith("stloc", StringComparison.Ordinal))
+                store++;
+            Sites.Expect(store < instructions.Count && instructions[store].Operand is Local flag &&
+                         flag.Type.FullName == "System.Boolean",
+                "the prepositioned test is not stored in a bool local");
+            return (Local)instructions[store].Operand;
+        }
+        throw new InvalidOperationException(
+            "shape check failed: BuildPublisherImage does not test PrepositionedFihOutputPath for " +
+            "emptiness. Upstream IL has changed; re-derive the patch against the new release.");
+    }
+
+    /// <summary>
+    /// Site 17. <c>TryDeleteTemp</c> returns immediately for a window path. The <c>ret</c> is
+    /// mutated rather than preceded, so every existing branch and handler bound still points at a
+    /// live instruction — the same technique this file uses on the six-argument opens.
+    /// </summary>
+    private static void GuardTempDelete(MethodDef tryDeleteTemp, Sites.Shim shim)
+    {
+        var body = tryDeleteTemp.Body.Instructions;
+        Sites.Expect(body.Count > 0, "TryDeleteTemp has no body");
+        Sites.Expect(tryDeleteTemp.IsStatic && tryDeleteTemp.MethodSig.Params.Count == 1 &&
+                     tryDeleteTemp.MethodSig.Params[0].FullName == "System.String",
+            "TryDeleteTemp is not a static method taking one string");
+        ExpectNotTargeted(tryDeleteTemp, body, 0, 1, "the first instruction of TryDeleteTemp");
+
+        var first = body[0];
+        body.Insert(0, OpCodes.Ldarg_0.ToInstruction());
+        body.Insert(1, OpCodes.Call.ToInstruction(shim.InPlaceTryDelete));
+        body.Insert(2, OpCodes.Brfalse.ToInstruction(first));
+        body.Insert(3, OpCodes.Ret.ToInstruction());
+        tryDeleteTemp.Body.UpdateInstructionOffsets();
+    }
 }
