@@ -18,7 +18,13 @@ When the layout optimiser selects a moving plan, the permutation is replayed ins
 rather than through a second file. If the displaced bytes would not fit in memory (512 MB by
 default) the build falls back to a spool, says so, and produces the same package.
 
-Needs `./fpkg patch`: this adds IL sites 17-24. Without them the build spools and tells you so.
+When the layout relocation runs, it costs two extra sequential reads of the inner image. That only
+happens on layouts the optimiser chooses to move, which the default build never produces.
+
+Needs `./fpkg patch`: this adds IL sites 17-24, recorded as a new `inplace` patch leg. **A library
+patched by an earlier fpkg release needs re-patching** — it reports `ffpfsc` but has none of these
+sites, and the build detects that, spools, and tells you so rather than promising a single-file
+build it cannot do.
 
 
 ## fpkg 0.6.9-fix1
