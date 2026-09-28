@@ -1171,11 +1171,25 @@ internal static class Program
             // leaving extents back at 64 bytes and a package WORSE than not patching at all.
             // Measured free on their own: with the flags and no fillers, output is byte-identical
             // to the plain baseline.
+            // Undocumented test hook: --force-coalescing overrides the --playgo-fix veto. That
+            // combination makes a WORSE package (see above), but it is the only configuration in
+            // which the layout optimiser actually selects a moving plan, and so the only way to
+            // exercise the in-place relocation pass end to end. Never use it for a real build.
             EnableOuterBlockCoalescing =
-                !flags.ContainsKey("no-coalescing") && !playGoFix,
+                !flags.ContainsKey("no-coalescing") &&
+                (!playGoFix || flags.ContainsKey("force-coalescing")),
             EnableRelocationAlignmentAdjustment =
-                !flags.ContainsKey("no-relocation-align") && !playGoFix,
+                !flags.ContainsKey("no-relocation-align") &&
+                (!playGoFix || flags.ContainsKey("force-coalescing")),
             EnableShufflePatternAnalysis = shuffleAnalysis,
+            // Undocumented test hook. The layout optimiser only produces a moving plan when it
+            // can reclaim more than this, and on ordinary sources it cannot, so the in-place
+            // relocation pass would never be exercised. Lowering it makes that path reachable.
+            MinimumLayoutSavingsBytes =
+                flags.TryGetValue("layout-savings", out string? savings) &&
+                long.TryParse(savings, out long savingsBytes) ? savingsBytes : 1048576L,
+            MinimumLayoutSavingsPercent =
+                flags.ContainsKey("layout-savings") ? 0.0 : 0.1,
 #endif
 #if LIB_HAS_SDK_VERSIONS
             SdkVersionOverride = sdkVersion,
