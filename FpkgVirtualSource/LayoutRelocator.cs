@@ -359,5 +359,21 @@ internal static class LayoutRelocator
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) =>
             throw new NotSupportedException();
+
+        /// <summary>
+        /// Disposal has to reach the window underneath: the FIH finalizer opens the finished
+        /// package exclusively, so a handle left open here fails the build at the very last step,
+        /// after every stage has already succeeded.
+        /// </summary>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                staged.Clear();
+                if (ReferenceEquals(current, this)) current = null;
+                inner.Dispose();
+            }
+            base.Dispose(disposing);
+        }
     }
 }

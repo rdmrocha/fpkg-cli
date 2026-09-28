@@ -87,6 +87,27 @@ public class InPlaceImageTests : IDisposable
     }
 
     [Fact]
+    public void DisposingAWindowReleasesTheUnderlyingFileHandle()
+    {
+        // The FIH finalizer opens the finished package exclusively. Every window the shim hands
+        // out is wrapped, and a wrapper that does not pass disposal on leaves a live handle that
+        // fails the build at the last step, after every stage has already succeeded.
+        InPlaceImage.Enabled = true;
+        string pkg = Path.Combine(Path.GetTempPath(), "ip-" + Guid.NewGuid().ToString("N") + ".pkg");
+        string window = InPlaceImage.SpoolPathFor("/tmp/spool.dat", pkg, prepositioned: true);
+
+        using (Stream s = InPlaceImage.Open(window, FileMode.Create, FileAccess.ReadWrite,
+                                            FileShare.None, 4096, FileOptions.None))
+            s.Write([1, 2, 3, 4], 0, 4);
+        using (Stream s = InPlaceImage.Open(window, FileMode.Open, FileAccess.Read,
+                                            FileShare.Read, 4096, FileOptions.None))
+            s.ReadByte();
+
+        using (File.Open(pkg, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+        File.Delete(pkg);
+    }
+
+    [Fact]
     public void OpenFallsThroughToARealFileForOrdinaryPaths()
     {
         string path = Path.Combine(Path.GetTempPath(), "plain-" + Guid.NewGuid().ToString("N"));

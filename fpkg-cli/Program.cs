@@ -179,8 +179,13 @@ internal static class Program
                                   free also OMITS license.dat and license.info entirely - one
                                   library predicate drives drm_type and the licence together.
           --compress              store the inner pfs_image.dat PFSC-compressed
-          --temp-dir <dir>        holds the intermediate CNT/inner/outer images
+          --temp-dir <dir>        holds the intermediate CNT and NAPS sidecar
                                   (default: the OS temp dir; must be outside --source)
+          --spool                 build through a full-size inner-image spool in --temp-dir,
+                                  the pre-0.7 behaviour. The default writes the inner image
+                                  straight into the package and transforms it in place, so a
+                                  build needs about the package's own size in free space on
+                                  the --out volume rather than twice it across two volumes.
           --sdk-version <n|0xHEX|keep>
                                   SDK to stamp: a major generation (1-11, resolved to that
                                   release's canonical value) or a full 64-bit executable
@@ -817,6 +822,30 @@ internal static class Program
         // ON by default, because both oracles agree.
         FpkgVirtualSource.CntEntryPolicy.SuppressRightSprx = !flags.ContainsKey("keep-right-sprx");
 
+        // The single-file build. Stock LibProsperoPkg spools the whole inner pfs_image.dat into
+        // --temp-dir and then copies it, encrypted, into the package, so a build needs twice the
+        // package size in free space. Sites 17-24 write that image straight into the package's
+        // outer-PFS data region and transform it in place, which needs about the package's own
+        // size and no large temp file at all. ON by default; --spool restores the two-file path,
+        // which is also the oracle the in-place path is tested against.
+        FpkgVirtualSource.InPlaceImage.Reset();
+        bool spool = flags.ContainsKey("spool");
+        if (!spool && !LibraryResolver.Selection.Patches.Contains("ffpfsc"))
+        {
+            Console.WriteLine(
+                "warning: LibProsperoPkg is not patched, so the single-file build is unavailable; " +
+                "this build will spool the inner image and needs about twice the package size in " +
+                "free space. Run `fpkg patch` to enable it.");
+            spool = true;
+        }
+        FpkgVirtualSource.InPlaceImage.Enabled = !spool;
+        FpkgVirtualSource.InPlaceImage.FallbackDirectory = tempDir;
+        // Undocumented test hook: forces the in-place relocation to give up, so the fallback can
+        // be exercised on a source tree whose layout would otherwise fit comfortably.
+        if (flags.TryGetValue("relocation-budget", out string? budget) &&
+            long.TryParse(budget, out long budgetBytes))
+            FpkgVirtualSource.InPlaceImage.MaxRelocationBytes = budgetBytes;
+
         // Fillers are written INTO the source folder and removed afterwards, the same contract
         // the sce_sys quarantine and the media repair already use. No mirror, no hard links, no
         // dependence on --temp-dir being on the source's volume.
@@ -1232,7 +1261,11 @@ internal static class Program
         Console.WriteLine($"  source: {source}");
         Console.WriteLine($"  output: {output}");
 #if LIB_HAS_BUILD_TUNING
-        Console.WriteLine($"  temp:   {tempDir}");
+        Console.WriteLine($"  temp:   {tempDir}" +
+                          (FpkgVirtualSource.InPlaceImage.Enabled
+                              ? "  (CNT and NAPS sidecar only; the inner image goes straight " +
+                                "into the package)"
+                              : "  (holds a full-size inner-image spool)"));
         Console.WriteLine($"  kraken: level {krakenLevel} (-4 fast, 9 maximum), " +
                           $"{(krakenThreads == 0 ? Math.Max(1, Environment.ProcessorCount) : krakenThreads)} worker(s)");
 #endif
@@ -1342,6 +1375,8 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine($"Output: {result.OutputPath}");
         foreach (var warning in result.Warnings) Console.WriteLine($"  warning: {warning}");
+        if (FpkgVirtualSource.InPlaceImage.FallbackReason is string fellBack)
+            Console.WriteLine($"  warning: the single-file build fell back to a spool: {fellBack}");
 
         if (!flags.ContainsKey("no-verify") && options.OutputFormat == ProsperoOutputFormat.DebugImage)
         {

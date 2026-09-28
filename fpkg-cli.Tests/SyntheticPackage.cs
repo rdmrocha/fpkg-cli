@@ -18,6 +18,55 @@ namespace Fpkg.Tests;
 internal static class SyntheticPackage
 {
     internal const string Passcode = "00000000000000000000000000000000";
+
+    /// <summary>The minimal param.json a source tree needs, shared with fixtures built elsewhere.</summary>
+    internal static string ParamJson { get; } =
+        JsonSerializer.Serialize(new
+        {
+            contentId = ContentId,
+            titleId = "PPSA00001",
+            masterVersion = "01.00",
+            contentVersion = "01.000.000",
+            applicationCategoryType = 0,
+            localizedParameters = new
+            {
+                defaultLanguage = "en-US",
+                enUS = new { titleName = "Synthetic" },
+            },
+        }).Replace("\"enUS\"", "\"en-US\"");
+
+    /// <summary>Builds an arbitrary source tree into its own output directory and returns the .pkg.</summary>
+    internal static string BuildAt(string source, string tag, string[] extraArgs)
+    {
+        string output = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"ip-out-{tag}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(output);
+        Run(Cli(), ["build", "--source", source, "--out", output, .. extraArgs]);
+
+        string[] built = Directory.GetFiles(output, "*.pkg");
+        if (built.Length != 1)
+            throw new InvalidOperationException(
+                $"expected one .pkg in {output}, found {built.Length}");
+        return built[0];
+    }
+
+    /// <summary>Runs the CLI and hands back its exit code and output, for tests that assert on both.</summary>
+    internal static (int Exit, string Log) RunFpkg(string[] arguments)
+    {
+        var info = new ProcessStartInfo(Cli())
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string argument in arguments) info.ArgumentList.Add(argument);
+
+        using var process = Process.Start(info)
+            ?? throw new InvalidOperationException("could not start the fpkg launcher");
+        string output = process.StandardOutput.ReadToEnd();
+        string error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return (process.ExitCode, output + error);
+    }
     internal const string ContentId = "EP0001-PPSA00001_00-SYNTHETIC000000A";
 
     /// <summary>Files written into the source, with their sizes.</summary>
@@ -48,20 +97,7 @@ internal static class SyntheticPackage
             try { Directory.Delete(root, recursive: true); } catch (IOException) { }
         };
 
-        File.WriteAllText(System.IO.Path.Combine(source, "sce_sys", "param.json"),
-            JsonSerializer.Serialize(new
-            {
-                contentId = ContentId,
-                titleId = "PPSA00001",
-                masterVersion = "01.00",
-                contentVersion = "01.000.000",
-                applicationCategoryType = 0,
-                localizedParameters = new
-                {
-                    defaultLanguage = "en-US",
-                    enUS = new { titleName = "Synthetic" },
-                },
-            }).Replace("\"enUS\"", "\"en-US\""));
+        File.WriteAllText(System.IO.Path.Combine(source, "sce_sys", "param.json"), ParamJson);
 
         // Fresh random for every block, not one block repeated: a repeated block compresses to
         // nothing and then no file is stored verbatim, which is exactly what the offset tests need
