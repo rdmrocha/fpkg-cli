@@ -1402,4 +1402,190 @@ internal static class Rewrites
                     $"{what} is an exception-handler {name} boundary; re-derive this rewrite " +
                     "against the current IL");
     }
+
+    /// <summary>
+    /// Sites 18-22. Makes ProsperoPs5InnerImageAssembler write its inner image through a
+    /// <c>fpkgwin:</c> window — a byte range of the final package — instead of a spool file.
+    ///
+    /// <para><b>18.</b> <c>Path.GetFullPath(spoolPath)</c> would mangle a window path into a real
+    /// one, so it becomes <c>InPlaceImage.GuardFullPath</c>, which has the same signature and
+    /// resolves anything that is not a window exactly as before.</para>
+    ///
+    /// <para><b>19/20.</b> The three <c>BuildFileIO.Open</c> calls that touch the image — the
+    /// compression write in <c>BuildCore</c>, the metadata write in <c>BuildImage</c>, and the
+    /// read in the layout-stream factory — route through <c>InPlaceImage.Open</c>. Only the
+    /// metadata write stores its result in a local, and that local is declared
+    /// <c>System.IO.FileStream</c>, which a window is not; it is retyped to <c>System.IO.Stream</c>.
+    /// No member reference needs retargeting: the compiler already emitted every call on that
+    /// local against <c>Stream</c>, which this rewrite asserts rather than assumes.</para>
+    ///
+    /// <para><b>22.</b> <c>BuildToSpool</c> passes <c>deferLayout: true</c>, which leaves the
+    /// layout permutation to be replayed by whoever reads the image. In place that would have the
+    /// outer-PFS writer reading through a mapping of the very bytes it is overwriting, so the
+    /// constant becomes a call to <c>InPlaceImage.DeferLayout</c> — still true unless the CLI has
+    /// switched the single-file build on.</para>
+    ///
+    /// <para><b>21.</b> <c>MaterializePhysicalLayout</c> gets a head guard. Our implementation
+    /// moves the extents inside the package, and handles its own fallback: the original body ends
+    /// in <c>Move(tmp, path)</c>, and for a window <c>path</c> is a scheme string, not a file.</para>
+    /// </summary>
+    internal static void InPlaceInnerImage(ModuleDefMD module, TypeDef assembler,
+                                           MethodDef buildToSpool, MethodDef buildCore,
+                                           MethodDef buildImage, MethodDef materialize,
+                                           Sites.Shim shim)
+    {
+        RedirectGetFullPath(buildToSpool, shim);
+        ReplaceDeferLayoutConstant(buildToSpool, shim);
+
+        RedirectBuildFileIoOpen(buildCore, shim, "BuildCore");
+        RedirectBuildFileIoOpen(buildImage, shim, "BuildImage");
+        RetypeImageFileStreamLocal(module, buildImage);
+        RedirectBuildFileIoOpen(FindLayoutStreamFactory(assembler), shim, "the layout-stream factory");
+
+        GuardMaterializePhysicalLayout(materialize, shim);
+
+        buildToSpool.Body.UpdateInstructionOffsets();
+        buildCore.Body.UpdateInstructionOffsets();
+        buildImage.Body.UpdateInstructionOffsets();
+        materialize.Body.UpdateInstructionOffsets();
+    }
+
+    /// <summary>Site 18. A straight operand swap: both methods are string -> string.</summary>
+    private static void RedirectGetFullPath(MethodDef method, Sites.Shim shim)
+    {
+        int found = 0;
+        foreach (var ins in method.Body.Instructions)
+        {
+            if (ins.OpCode == OpCodes.Call && ins.Operand is IMethod m &&
+                m.FullName.Contains("System.IO.Path::GetFullPath", StringComparison.Ordinal))
+            {
+                ins.Operand = shim.InPlaceGuardPath;
+                found++;
+            }
+        }
+        Sites.Expect(found == 1,
+            $"{method.Name} calls Path.GetFullPath {found} times, expected exactly 1");
+    }
+
+    /// <summary>
+    /// Site 21. The <c>deferLayout</c> argument of the BuildCore call is a literal <c>true</c>
+    /// sitting immediately before it, which is what makes the swap safe to do by position.
+    /// </summary>
+    private static void ReplaceDeferLayoutConstant(MethodDef buildToSpool, Sites.Shim shim)
+    {
+        var instructions = buildToSpool.Body.Instructions;
+        int call = -1;
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            if (instructions[i].OpCode == OpCodes.Call && instructions[i].Operand is IMethod m &&
+                m.Name.String == "BuildCore")
+            {
+                Sites.Expect(call < 0, "BuildToSpool calls BuildCore more than once");
+                call = i;
+            }
+        }
+        Sites.Expect(call > 0, "BuildToSpool does not call BuildCore");
+
+        var constant = instructions[call - 1];
+        Sites.Expect(constant.OpCode == OpCodes.Ldc_I4_1,
+            $"the deferLayout argument of BuildCore is {constant.OpCode}, expected ldc.i4.1; " +
+            "the argument order has changed and this swap would hit the wrong parameter");
+        ExpectNotTargeted(buildToSpool, instructions, call - 1, 1, "the deferLayout constant");
+
+        instructions[call - 1] = OpCodes.Call.ToInstruction(shim.InPlaceDeferLayout);
+    }
+
+    /// <summary>Sites 19 and 20. BuildFileIO.Open and InPlaceImage.Open take the same six
+    /// arguments; only the return type differs (FileStream against Stream), which matters just
+    /// where the result is stored in a typed local.</summary>
+    private static void RedirectBuildFileIoOpen(MethodDef method, Sites.Shim shim, string what)
+    {
+        int found = 0;
+        foreach (var ins in method.Body.Instructions)
+        {
+            if (ins.OpCode == OpCodes.Call && ins.Operand is IMethod m &&
+                m.FullName.Contains("BuildFileIO::Open", StringComparison.Ordinal))
+            {
+                ins.Operand = shim.InPlaceOpen;
+                found++;
+            }
+        }
+        Sites.Expect(found == 1, $"{what} calls BuildFileIO.Open {found} times, expected exactly 1");
+    }
+
+    /// <summary>
+    /// Site 20. The metadata write keeps its stream in a FileStream-typed local. A window is not a
+    /// FileStream, so the local is widened to Stream — safe only because every call made on it is
+    /// already emitted against Stream (or IDisposable), which is asserted here.
+    /// </summary>
+    private static void RetypeImageFileStreamLocal(ModuleDefMD module, MethodDef buildImage)
+    {
+        var locals = buildImage.Body.Variables
+            .Where(v => v.Type.FullName == "System.IO.FileStream").ToList();
+        Sites.Expect(locals.Count == 1,
+            $"BuildImage has {locals.Count} FileStream locals, expected exactly 1");
+        var local = locals[0];
+
+        foreach (var ins in buildImage.Body.Instructions)
+        {
+            if (ins.Operand is IMethod m && ins.OpCode == OpCodes.Callvirt &&
+                m.DeclaringType?.FullName == "System.IO.FileStream")
+                Sites.Expect(false,
+                    $"BuildImage calls {m.FullName} against the FileStream local; widening it to " +
+                    "Stream would break that call, so this rewrite must retarget it first");
+        }
+
+        local.Type = new Importer(module).ImportAsTypeSig(typeof(System.IO.Stream));
+    }
+
+    /// <summary>
+    /// Site 20. The read side is a lambda in a compiler-generated display class whose ordinal
+    /// moves between releases, so it is found by shape: no parameters, returns a Stream, and
+    /// constructs a PhysicalLayoutStream.
+    /// </summary>
+    private static MethodDef FindLayoutStreamFactory(TypeDef assembler)
+    {
+        var candidates = assembler.NestedTypes
+            .SelectMany(t => t.Methods)
+            .Where(m => m.HasBody &&
+                        m.MethodSig.Params.Count == 0 &&
+                        m.MethodSig.RetType.FullName == "System.IO.Stream" &&
+                        m.Body.Instructions.Any(i =>
+                            i.OpCode == OpCodes.Newobj && i.Operand is IMethod c &&
+                            c.DeclaringType?.Name == "PhysicalLayoutStream"))
+            .ToList();
+
+        Sites.Expect(candidates.Count == 1,
+            $"found {candidates.Count} PhysicalLayoutStream factories in the assembler's nested " +
+            "types, expected exactly 1");
+        return candidates[0];
+    }
+
+    /// <summary>
+    /// Site 22. Three instructions at the head, using the same technique as
+    /// <see cref="SuppressAboutRightSprx"/>: the guard returns when the shim reports it has
+    /// handled the relocation, and otherwise falls through to the original body.
+    /// </summary>
+    private static void GuardMaterializePhysicalLayout(MethodDef materialize, Sites.Shim shim)
+    {
+        var body = materialize.Body.Instructions;
+        Sites.Expect(body.Count > 0, "MaterializePhysicalLayout has no body");
+        Sites.Expect(!materialize.IsStatic,
+            "MaterializePhysicalLayout is static; the guard below loads its arguments as ldarg 1-3");
+        Sites.Expect(materialize.MethodSig.Params.Count == 3 &&
+                     materialize.MethodSig.Params[0].FullName == "System.String" &&
+                     materialize.MethodSig.Params[1].FullName == "System.Func`1<System.IO.Stream>" &&
+                     materialize.MethodSig.Params[2].FullName == "System.Int64",
+            "MaterializePhysicalLayout does not take (string, Func<Stream>, long)");
+        ExpectNotTargeted(materialize, body, 0, 1,
+            "the first instruction of MaterializePhysicalLayout");
+
+        var first = body[0];
+        body.Insert(0, OpCodes.Ldarg_1.ToInstruction());
+        body.Insert(1, OpCodes.Ldarg_2.ToInstruction());
+        body.Insert(2, OpCodes.Ldarg_3.ToInstruction());
+        body.Insert(3, OpCodes.Call.ToInstruction(shim.InPlaceMaterialize));
+        body.Insert(4, OpCodes.Brfalse.ToInstruction(first));
+        body.Insert(5, OpCodes.Ret.ToInstruction());
+    }
 }

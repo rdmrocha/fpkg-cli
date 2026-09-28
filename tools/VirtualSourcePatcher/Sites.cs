@@ -80,6 +80,21 @@ internal static class Sites
             var order = Type(shim, "FpkgVirtualSource.PlayGoFillerOrder");
             FillerMoveLast = importer.Import(
                 Method(order, "MoveFillersLast", "System.Void", 1));
+
+            // Sites 17-24. The single-file build: the inner image is written into the package's
+            // outer-PFS data region and transformed in place, so no spool copy exists. Every one
+            // of these is inert while InPlaceImage.Enabled is false — SpoolPathFor returns the
+            // spool path it was given, GuardFullPath and Open fall through to Path.GetFullPath
+            // and a plain FileStream, DeferLayout returns the stock constant true, and
+            // MaterializeInPlace and TryDeleteWindow return false, leaving the original body.
+            var inPlace = Type(shim, "FpkgVirtualSource.InPlaceImage");
+            InPlaceSpoolPath = importer.Import(Method(inPlace, "SpoolPathFor", "System.String", 3));
+            InPlaceGuardPath = importer.Import(Method(inPlace, "GuardFullPath", "System.String", 1));
+            InPlaceOpen = importer.Import(Method(inPlace, "Open", "System.IO.Stream", 6));
+            InPlaceDeferLayout = importer.Import(Method(inPlace, "DeferLayout", "System.Boolean", 0));
+            InPlaceMaterialize = importer.Import(Method(inPlace, "MaterializeInPlace", "System.Boolean", 3));
+            InPlaceLengthOf = importer.Import(Method(inPlace, "LengthOf", "System.Int64", 1));
+            InPlaceTryDelete = importer.Import(Method(inPlace, "TryDeleteWindow", "System.Boolean", 1));
         }
 
         internal IMethod IsVirtual { get; }
@@ -93,5 +108,12 @@ internal static class Sites
         internal IMethod CntAdjustFlags1 { get; }
         internal IMethod CntSkipRightSprx { get; }
         internal IMethod FillerMoveLast { get; }
+        internal IMethod InPlaceSpoolPath { get; }
+        internal IMethod InPlaceGuardPath { get; }
+        internal IMethod InPlaceOpen { get; }
+        internal IMethod InPlaceDeferLayout { get; }
+        internal IMethod InPlaceMaterialize { get; }
+        internal IMethod InPlaceLengthOf { get; }
+        internal IMethod InPlaceTryDelete { get; }
     }
 }
