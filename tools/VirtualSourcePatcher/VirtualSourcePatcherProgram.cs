@@ -128,10 +128,18 @@ public static class VirtualSourcePatcherProgram
                 Sites.Method(assembler, "BuildImage", "System.Byte[]", 15),
                 Sites.Method(assembler, "MaterializePhysicalLayout", "System.Void", 3),
                 shim);
+            Rewrites.InPlaceOuterWriter(
+                module,
+                Sites.Method(Sites.Type(module, "LibProsperoPkg.PFS.ProsperoOuterPfsBuilder"),
+                             "BuildForPackageToFile",
+                             "LibProsperoPkg.PFS.ProsperoOuterPackageFileResult", 10),
+                Sites.Method(Sites.Type(module, "LibProsperoPkg.PFS.ProsperoOuterFileSource"),
+                             "OpenRead", "System.IO.Stream", 0),
+                shim);
 
             module.Write(output);
             Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, " +
-                              "14, 15, 16, 17, 18, 19, 20, 21, 22)");
+                              "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)");
             return 0;
         }
         catch (Exception ex)

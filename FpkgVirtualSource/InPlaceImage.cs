@@ -136,7 +136,21 @@ public static class InPlaceImage
         return window;
     }
 
-    /// <summary>Site 23. The declared length of a window, which no <c>FileInfo</c> can report.</summary>
+    /// <summary>
+    /// Site 24. The <c>FileMode</c> the outer-PFS writer opens its output with. In place the
+    /// output already holds the plaintext inner image, so it must not be truncated; with the
+    /// single-file build off this is the stock <c>Create</c>, which is what clears a stale package
+    /// left by an earlier run.
+    /// </summary>
+    public static int OutputFileMode() => (int)(Enabled ? FileMode.OpenOrCreate : FileMode.Create);
+
+    /// <summary>
+    /// Site 24. The <c>FileShare</c> the outer-PFS writer opens its output with. In place the read
+    /// window feeding it is a second handle on the same file.
+    /// </summary>
+    public static int OutputFileShare() => (int)(Enabled ? FileShare.ReadWrite : FileShare.None);
+
+    /// <summary>Site 24. The declared length of a window, which no <c>FileInfo</c> can report.</summary>
     public static long LengthOf(string path)
     {
         if (!IsWindow(path)) return new FileInfo(path).Length;

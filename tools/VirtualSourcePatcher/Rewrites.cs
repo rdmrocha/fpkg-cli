@@ -1588,4 +1588,143 @@ internal static class Rewrites
         body.Insert(4, OpCodes.Brfalse.ToInstruction(first));
         body.Insert(5, OpCodes.Ret.ToInstruction());
     }
+
+    /// <summary>
+    /// Sites 23-24. Lets the outer-PFS writer transform the inner image in place.
+    ///
+    /// <para><b>23.</b> <c>ProsperoOuterFileSource.OpenRead</c> opens its source through the shim,
+    /// so a window path yields a read view of the package's own data region. Its local is already
+    /// declared <c>Stream</c>, so nothing else moves.</para>
+    ///
+    /// <para><b>24.</b> Three changes to <c>BuildForPackageToFile</c>. The output handle is kept in
+    /// a <c>FileStream</c>-typed display-class field, which is widened to <c>Stream</c> (no call
+    /// on it is emitted against <c>FileStream</c>, which is asserted). Its <c>FileMode.Create</c>
+    /// arm and its <c>FileShare.None</c> argument become shim calls: in place the file must not be
+    /// truncated — stage 1 already wrote the plaintext image into it — and the write handle must
+    /// tolerate the read window feeding it. Both shim calls return the stock constant while the
+    /// single-file build is off, so a <c>--spool</c> build opens the output exactly as before,
+    /// which matters because <c>Create</c> is what clears a stale package from an earlier run.
+    /// Finally <c>new FileInfo(path).Length</c> cannot measure a window, so it becomes
+    /// <c>InPlaceImage.LengthOf</c>.</para>
+    ///
+    /// <para>The <c>FileMode.CreateNew</c> arm is deliberately left alone: it is taken only when the
+    /// outer PFS is NOT prepositioned into the output, and the single-file build refuses that
+    /// configuration anyway.</para>
+    /// </summary>
+    internal static void InPlaceOuterWriter(ModuleDefMD module, MethodDef buildForPackageToFile,
+                                            MethodDef openRead, Sites.Shim shim)
+    {
+        RedirectBuildFileIoOpen(openRead, shim, "ProsperoOuterFileSource.OpenRead");
+        Sites.Expect(openRead.Body.Variables.All(v => v.Type.FullName != "System.IO.FileStream"),
+            "ProsperoOuterFileSource.OpenRead keeps its stream in a FileStream local; a window " +
+            "is not a FileStream, so that local would have to be widened first");
+
+        RedirectBuildFileIoOpen(buildForPackageToFile, shim, "BuildForPackageToFile");
+        WidenOutputImageField(module, buildForPackageToFile);
+        RelaxOutputOpenConstants(buildForPackageToFile, shim);
+        RedirectSourceFileLength(buildForPackageToFile, shim);
+        buildForPackageToFile.Body.UpdateInstructionOffsets();
+    }
+
+    /// <summary>Site 24. The output handle's field, widened so a window can live in it.</summary>
+    private static void WidenOutputImageField(ModuleDefMD module, MethodDef buildForPackageToFile)
+    {
+        FieldDef? image = null;
+        foreach (var ins in buildForPackageToFile.Body.Instructions)
+        {
+            if (ins.OpCode == OpCodes.Stfld && ins.Operand is IField f &&
+                f.FieldSig?.Type.FullName == "System.IO.FileStream")
+            {
+                var def = f.ResolveFieldDef();
+                Sites.Expect(def is not null, $"cannot resolve the output field {f.FullName}");
+                Sites.Expect(image is null || image == def,
+                    "BuildForPackageToFile stores to more than one FileStream field");
+                image = def;
+            }
+        }
+        Sites.Expect(image is not null,
+            "BuildForPackageToFile does not store its output handle in a FileStream field");
+
+        foreach (var method in image!.DeclaringType.Methods.Where(m => m.HasBody))
+            foreach (var ins in method.Body.Instructions)
+                Sites.Expect(!(ins.Operand is IMethod m2 &&
+                               m2.DeclaringType?.FullName == "System.IO.FileStream"),
+                    $"{method.Name} calls a FileStream member on the widened output field");
+
+        image.FieldSig.Type = new Importer(module).ImportAsTypeSig(typeof(System.IO.Stream));
+    }
+
+    /// <summary>
+    /// Site 24. The FileMode.Create arm and the FileShare.None argument of the output open become
+    /// shim calls. Both instructions are mutated in place rather than replaced, because the mode
+    /// arm is a branch target and dnlib branches bind to instruction objects.
+    /// </summary>
+    private static void RelaxOutputOpenConstants(MethodDef method, Sites.Shim shim)
+    {
+        var instructions = method.Body.Instructions;
+        int open = IndexOfSingleBuildFileIoOpen(instructions, "BuildForPackageToFile");
+
+        // ... mode, access, share, bufferSize, options, call
+        var share = instructions[open - 3];
+        var access = instructions[open - 4];
+        var create = instructions[open - 5];
+        Sites.Expect(access.OpCode == OpCodes.Ldc_I4_3,
+            $"the FileAccess argument of the output open is {access.OpCode}, expected " +
+            "ldc.i4.3 (ReadWrite); the argument order has changed");
+        Sites.Expect(share.OpCode == OpCodes.Ldc_I4_0,
+            $"the FileShare argument of the output open is {share.OpCode}, expected " +
+            "ldc.i4.0 (None)");
+        Sites.Expect(create.OpCode == OpCodes.Ldc_I4_2,
+            $"the FileMode argument of the output open is {create.OpCode}, expected " +
+            "ldc.i4.2 (Create) as the taken arm of the prepositioned ternary");
+
+        create.OpCode = OpCodes.Call;
+        create.Operand = shim.InPlaceOutputMode;
+        share.OpCode = OpCodes.Call;
+        share.Operand = shim.InPlaceOutputShare;
+    }
+
+    /// <summary>Site 24. new FileInfo(path).Length -> InPlaceImage.LengthOf(path).</summary>
+    private static void RedirectSourceFileLength(MethodDef method, Sites.Shim shim)
+    {
+        var instructions = method.Body.Instructions;
+        int ctor = -1;
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            if (instructions[i].OpCode == OpCodes.Newobj && instructions[i].Operand is IMethod m &&
+                m.DeclaringType?.FullName == "System.IO.FileInfo")
+            {
+                Sites.Expect(ctor < 0, "BuildForPackageToFile constructs more than one FileInfo");
+                ctor = i;
+            }
+        }
+        Sites.Expect(ctor >= 0, "BuildForPackageToFile does not measure a source with FileInfo");
+        Sites.Expect(ctor + 1 < instructions.Count &&
+                     instructions[ctor + 1].OpCode == OpCodes.Call &&
+                     instructions[ctor + 1].Operand is IMethod g &&
+                     g.Name.String == "get_Length",
+            "the FileInfo is not immediately measured with get_Length");
+        ExpectNotTargeted(method, instructions, ctor, 2, "the FileInfo length measurement");
+
+        instructions[ctor].OpCode = OpCodes.Nop;
+        instructions[ctor].Operand = null;
+        instructions[ctor + 1].Operand = shim.InPlaceLengthOf;
+    }
+
+    private static int IndexOfSingleBuildFileIoOpen(IList<Instruction> instructions, string what)
+    {
+        int found = -1;
+        for (int i = 0; i < instructions.Count; i++)
+        {
+            if (instructions[i].OpCode == OpCodes.Call && instructions[i].Operand is IMethod m &&
+                (m.FullName.Contains("BuildFileIO::Open", StringComparison.Ordinal) ||
+                 m.FullName.Contains("InPlaceImage::Open", StringComparison.Ordinal)))
+            {
+                Sites.Expect(found < 0, $"{what} opens more than one file");
+                found = i;
+            }
+        }
+        Sites.Expect(found >= 0, $"{what} does not call BuildFileIO.Open");
+        return found;
+    }
 }

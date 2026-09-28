@@ -95,6 +95,8 @@ internal static class Sites
             InPlaceMaterialize = importer.Import(Method(inPlace, "MaterializeInPlace", "System.Boolean", 3));
             InPlaceLengthOf = importer.Import(Method(inPlace, "LengthOf", "System.Int64", 1));
             InPlaceTryDelete = importer.Import(Method(inPlace, "TryDeleteWindow", "System.Boolean", 1));
+            InPlaceOutputMode = importer.Import(Method(inPlace, "OutputFileMode", "System.Int32", 0));
+            InPlaceOutputShare = importer.Import(Method(inPlace, "OutputFileShare", "System.Int32", 0));
         }
 
         internal IMethod IsVirtual { get; }
@@ -115,5 +117,7 @@ internal static class Sites
         internal IMethod InPlaceMaterialize { get; }
         internal IMethod InPlaceLengthOf { get; }
         internal IMethod InPlaceTryDelete { get; }
+        internal IMethod InPlaceOutputMode { get; }
+        internal IMethod InPlaceOutputShare { get; }
     }
 }

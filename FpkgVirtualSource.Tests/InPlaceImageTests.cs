@@ -111,6 +111,23 @@ public class InPlaceImageTests : IDisposable
     }
 
     [Fact]
+    public void TheOutputOpenIsRelaxedOnlyWhileTheSingleFileBuildIsOn()
+    {
+        // With the single-file build off, the outer writer must open the output exactly as stock
+        // LibProsperoPkg does: Create is what clears a stale package from an earlier run, and
+        // relaxing it unconditionally would let stale bytes survive under the new length.
+        InPlaceImage.Enabled = false;
+        Assert.Equal((int)FileMode.Create, InPlaceImage.OutputFileMode());
+        Assert.Equal((int)FileShare.None, InPlaceImage.OutputFileShare());
+
+        // In place the output already holds the plaintext image, and the read window needs a
+        // second handle on it.
+        InPlaceImage.Enabled = true;
+        Assert.Equal((int)FileMode.OpenOrCreate, InPlaceImage.OutputFileMode());
+        Assert.Equal((int)FileShare.ReadWrite, InPlaceImage.OutputFileShare());
+    }
+
+    [Fact]
     public void ABudgetOverflowSpoolsTheImageAndKeepsServingIt()
     {
         // The library's own MaterializePhysicalLayout ends in Move(tmp, path). `path` is the
