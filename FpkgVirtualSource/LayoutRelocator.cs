@@ -30,10 +30,34 @@ internal static class LayoutRelocator
     /// <summary>How much of the image is moved per read/write.</summary>
     private const int ChunkSize = 4 * 1024 * 1024;
 
-    /// <summary>One read the library's layout stream performed against the image.</summary>
-    internal readonly record struct SourceRead(long Start, long Length)
+    /// <summary>
+    /// One read the library's layout stream performed against the image, tagged with the
+    /// destination chunk it was serving. <see cref="Chunk"/> is the frontier: a read is certainly
+    /// consumed once the move has finished writing that chunk, and not before.
+    /// </summary>
+    internal readonly record struct SourceRead(long Start, long Length, int Chunk)
     {
+        /// <summary>A bare byte range — staged ranges and intersections, which carry no frontier.</summary>
+        internal SourceRead(long start, long length) : this(start, length, 0) { }
+
         internal long End => Start + Length;
+    }
+
+    /// <summary>
+    /// The index of the first read that chunk <paramref name="chunk"/> has not certainly consumed
+    /// yet. Reads are recorded in destination order, so <see cref="SourceRead.Chunk"/> is
+    /// non-decreasing and a scan finds the boundary.
+    ///
+    /// <para>This one definition is what both the estimate and the move use, which is the point:
+    /// they must agree, or the estimate is not a bound on what the move does. An earlier version
+    /// counted read CALLS in the move and read BYTES in the estimate — two quantities that are
+    /// unrelated once contiguous reads are merged or a gap is served without any read at all.</para>
+    /// </summary>
+    private static int PendingFrom(IReadOnlyList<SourceRead> reads, int chunk)
+    {
+        for (int i = 0; i < reads.Count; i++)
+            if (reads[i].Chunk >= chunk) return i;
+        return reads.Count;
     }
 
     internal static bool TryMaterialize(
@@ -42,15 +66,16 @@ internal static class LayoutRelocator
         long length,
         long budgetBytes,
         Action<string>? log,
-        out string? fallbackReason)
+        out string? fallbackReason,
+        int chunkSize = ChunkSize)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(openSource);
         fallbackReason = null;
 
-        IReadOnlyList<SourceRead> reads = Discover(openSource, length);
+        IReadOnlyList<SourceRead> reads = Discover(openSource, length, chunkSize);
 
-        long peak = EstimatePeakStaging(reads, length);
+        long peak = EstimatePeakStaging(reads, length, chunkSize);
         if (peak > budgetBytes)
         {
             fallbackReason =
@@ -59,7 +84,7 @@ internal static class LayoutRelocator
             return false;
         }
 
-        Move(target, openSource, reads, length);
+        Move(target, openSource, reads, length, chunkSize);
         target.SetLength(length);
         log?.Invoke($"Inner layout write: materialised in place ({length:N0} bytes, " +
                     $"{reads.Count:N0} mapped range(s), peak staging {peak:N0} bytes).");
@@ -70,9 +95,10 @@ internal static class LayoutRelocator
     /// Pass 1. Reads the layout stream to its end and returns, in order, what it read from where.
     /// The bytes are discarded — only the addresses matter — and nothing is written.
     /// </summary>
-    private static IReadOnlyList<SourceRead> Discover(Func<Stream> openSource, long length)
+    private static IReadOnlyList<SourceRead> Discover(Func<Stream> openSource, long length,
+                                                     int chunkSize)
     {
-        byte[] scratch = new byte[ChunkSize];
+        byte[] scratch = new byte[chunkSize];
         using Stream source = openSource();
         RecordingSource recorder = RecordingSource.Current
             ?? throw new InvalidOperationException(
@@ -82,6 +108,7 @@ internal static class LayoutRelocator
         for (long read = 0; read < length;)
         {
             int want = (int)Math.Min(scratch.Length, length - read);
+            recorder.Chunk = (int)(read / chunkSize);
             source.ReadExactly(scratch.AsSpan(0, want));
             read += want;
         }
@@ -99,7 +126,11 @@ internal static class LayoutRelocator
             if (r.Length <= 0) continue;
             if (merged.Count != 0 && merged[^1].End == r.Start)
             {
-                merged[^1] = merged[^1] with { Length = merged[^1].Length + r.Length };
+                merged[^1] = merged[^1] with
+                {
+                    Length = merged[^1].Length + r.Length,
+                    Chunk = Math.Max(merged[^1].Chunk, r.Chunk),
+                };
                 continue;
             }
             merged.Add(r);
@@ -115,27 +146,23 @@ internal static class LayoutRelocator
     /// it really is, so the bound errs high: an over-estimate can only cost an unnecessary
     /// fallback, while an under-estimate could let the move run out of budget half-written.</para>
     /// </summary>
-    private static long EstimatePeakStaging(IReadOnlyList<SourceRead> reads, long length)
+    private static long EstimatePeakStaging(IReadOnlyList<SourceRead> reads, long length,
+                                            int chunkSize)
     {
         long peak = 0, live = 0;
         var staged = new List<SourceRead>();
-        int consumed = 0;
-        long consumedBytes = 0;
 
-        for (long w = 0; w < length; w += ChunkSize)
+        for (long w = 0; w < length; w += chunkSize)
         {
-            int n = (int)Math.Min(ChunkSize, length - w);
-            foreach (SourceRead need in Endangered(reads, consumed, w, n, staged))
+            int chunk = (int)(w / chunkSize);
+            int n = (int)Math.Min(chunkSize, length - w);
+            foreach (SourceRead need in Endangered(reads, PendingFrom(reads, chunk), w, n, staged))
             {
                 staged.Add(need);
                 live += need.Length;
                 peak = Math.Max(peak, live);
             }
-
-            while (consumed < reads.Count && consumedBytes + reads[consumed].Length <= w + n)
-                consumedBytes += reads[consumed++].Length;
-
-            live -= Release(staged, reads, consumed);
+            live -= Release(staged, reads, PendingFrom(reads, chunk + 1));
         }
         return peak;
     }
@@ -210,9 +237,9 @@ internal static class LayoutRelocator
 
     /// <summary>Pass 2. Replays the layout stream over the image itself.</summary>
     private static void Move(WindowStream target, Func<Stream> openSource,
-                             IReadOnlyList<SourceRead> reads, long length)
+                             IReadOnlyList<SourceRead> reads, long length, int chunkSize)
     {
-        byte[] buffer = new byte[ChunkSize];
+        byte[] buffer = new byte[chunkSize];
         using Stream source = openSource();
         RecordingSource server = RecordingSource.Current
             ?? throw new InvalidOperationException(
@@ -220,10 +247,11 @@ internal static class LayoutRelocator
         server.BeginServing();
 
         var staged = new List<SourceRead>();
-        for (long w = 0; w < length; w += ChunkSize)
+        for (long w = 0; w < length; w += chunkSize)
         {
-            int n = (int)Math.Min(ChunkSize, length - w);
-            foreach (SourceRead need in Endangered(reads, server.ServedReadCount, w, n, staged))
+            int chunk = (int)(w / chunkSize);
+            int n = (int)Math.Min(chunkSize, length - w);
+            foreach (SourceRead need in Endangered(reads, PendingFrom(reads, chunk), w, n, staged))
             {
                 server.Stage(need);
                 staged.Add(need);
@@ -233,7 +261,7 @@ internal static class LayoutRelocator
             target.Position = w;
             target.Write(buffer.AsSpan(0, n));
 
-            Release(staged, reads, server.ServedReadCount);
+            Release(staged, reads, PendingFrom(reads, chunk + 1));
             server.ReleaseAllBut(staged);
         }
         server.End();
@@ -255,8 +283,8 @@ internal static class LayoutRelocator
 
         internal IReadOnlyList<SourceRead> Reads => reads;
 
-        /// <summary>How many recorded reads pass 2 has served so far.</summary>
-        internal int ServedReadCount { get; private set; }
+        /// <summary>The destination chunk currently being served, stamped onto each read.</summary>
+        internal int Chunk { get; set; }
 
         internal RecordingSource Install()
         {
@@ -273,7 +301,6 @@ internal static class LayoutRelocator
         internal void BeginServing()
         {
             recording = false;
-            ServedReadCount = 0;
             staged.Clear();
         }
 
@@ -316,8 +343,7 @@ internal static class LayoutRelocator
             int read = ServeOrRead(buffer);
             if (read > 0)
             {
-                if (recording) reads.Add(new SourceRead(Position, read));
-                else ServedReadCount++;
+                if (recording) reads.Add(new SourceRead(Position, read, Chunk));
                 Position += read;
             }
             return read;

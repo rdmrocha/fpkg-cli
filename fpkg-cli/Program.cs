@@ -830,12 +830,13 @@ internal static class Program
         // which is also the oracle the in-place path is tested against.
         FpkgVirtualSource.InPlaceImage.Reset();
         bool spool = flags.ContainsKey("spool");
-        if (!spool && !LibraryResolver.Selection.Patches.Contains("ffpfsc"))
+        if (!spool && !LibraryResolver.Selection.InPlaceApplied)
         {
             Console.WriteLine(
-                "warning: LibProsperoPkg is not patched, so the single-file build is unavailable; " +
-                "this build will spool the inner image and needs about twice the package size in " +
-                "free space. Run `fpkg patch` to enable it.");
+                "warning: this LibProsperoPkg is not patched for the single-file build, so this " +
+                "build will spool the inner image and needs about twice the package size in free " +
+                "space. Run `fpkg patch` to enable it — a library patched by an earlier fpkg " +
+                "release needs re-patching too.");
             spool = true;
         }
         FpkgVirtualSource.InPlaceImage.Enabled = !spool;

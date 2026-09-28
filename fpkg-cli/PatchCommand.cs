@@ -121,6 +121,9 @@ internal static class PatchCommand
                 if (rc != 0) return rc;
                 File.Move(next, stage, overwrite: true);
                 applied.Add("ffpfsc");
+                // Sites 17-24 ride along with this leg, but they are recorded separately so a
+                // patched DLL from an earlier release cannot pass for one that has them.
+                applied.Add("inplace");
             }
 
             // Rename, not copy: see the ordering note above.

@@ -124,14 +124,37 @@ public static class InPlaceImage
         string? directory = Path.GetDirectoryName(file);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
 
-        // Create must clear the window only, never the reserved head, and the package is opened
-        // shared because stage 3 holds its own write handle on it while our read window feeds it.
+        // The package is opened shared, because stage 3 holds its own write handle on it while our
+        // read window feeds it.
         var fs = new FileStream(file, mode == FileMode.Create ? FileMode.OpenOrCreate : mode,
                                 access == FileAccess.Read ? FileAccess.Read : FileAccess.ReadWrite,
                                 FileShare.ReadWrite, bufferSize, options);
-        if (fs.Length < offset && access != FileAccess.Read) fs.SetLength(offset);
+        try
+        {
+            // Create clears the WHOLE file, not just the window. Stock stage 3 opens the output
+            // FileMode.Create, so the reserved head below the window starts as a hole and only the
+            // finaliser's own bytes land there; in place nothing else ever truncates this file, so
+            // skipping the head would leave an earlier package's bytes wherever the finaliser does
+            // not write — a byte-parity divergence against a --spool build.
+            if (mode == FileMode.Create && access != FileAccess.Read) fs.SetLength(0);
+            if (fs.Length < offset && access != FileAccess.Read) fs.SetLength(offset);
+        }
+        catch
+        {
+            fs.Dispose();
+            throw;
+        }
 
-        var window = new WindowStream(fs, offset, truncateOnOpen: mode == FileMode.Create);
+        WindowStream window;
+        try
+        {
+            window = new WindowStream(fs, offset, truncateOnOpen: mode == FileMode.Create);
+        }
+        catch
+        {
+            fs.Dispose();
+            throw;
+        }
         if (access != FileAccess.Read) lastWrite = window;
         return window;
     }

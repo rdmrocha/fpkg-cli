@@ -64,6 +64,36 @@ public sealed class PatchStampTests : IDisposable
         Assert.Empty(_warnings);
     }
 
+    /// <summary>
+    /// The single-file build needs IL sites 17-24, which arrive with the ffpfsc leg but did not
+    /// exist in earlier releases. A user who updates fpkg without re-running `fpkg patch` has a
+    /// patched DLL whose stamp says "ffpfsc" and which has none of those sites, so the ffpfsc
+    /// predicate cannot be the one that gates in-place: the build would claim a single-file
+    /// layout, print a disk promise it does not keep, and silently spool.
+    /// </summary>
+    [Fact]
+    public void AnOlderPatchedDllReportsFfpfscButNotInPlace()
+    {
+        string sha = WriteStock();
+        WritePatched(Stamp(sha, "oodle", "ffpfsc"));
+
+        var selection = PatchStamp.Select(_dir, Warn);
+
+        Assert.True(selection.FfpfscApplied);
+        Assert.False(selection.InPlaceApplied);
+    }
+
+    [Fact]
+    public void ACurrentPatchedDllReportsInPlace()
+    {
+        string sha = WriteStock();
+        WritePatched(Stamp(sha, "oodle", "ffpfsc", "inplace"));
+
+        var selection = PatchStamp.Select(_dir, Warn);
+
+        Assert.True(selection.InPlaceApplied);
+    }
+
     // ---- 2. patched, current, both legs -------------------------------------------------
 
     [Fact]

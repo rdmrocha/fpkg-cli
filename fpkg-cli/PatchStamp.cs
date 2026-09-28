@@ -23,6 +23,15 @@ internal readonly record struct PatchSelection(string? Path, IReadOnlyList<strin
     /// </summary>
     internal bool FfpfscApplied => Has("ffpfsc");
 
+    /// <summary>
+    /// Whether IL sites 17-24 — the single-file build — are in this DLL. A separate leg from
+    /// <see cref="FfpfscApplied"/> on purpose: they ship together, but a patched DLL produced by
+    /// an earlier fpkg release against the same stock library still reports <c>ffpfsc</c> and has
+    /// none of them. Gating in-place on the older predicate would have the CLI promise a
+    /// single-file build, print the disk figures for one, and then quietly spool.
+    /// </summary>
+    internal bool InPlaceApplied => Has("inplace");
+
     private bool Has(string patch) =>
         Patches.Any(p => string.Equals(p, patch, StringComparison.OrdinalIgnoreCase));
 }

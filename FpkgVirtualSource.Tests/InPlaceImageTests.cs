@@ -108,6 +108,29 @@ public class InPlaceImageTests : IDisposable
     }
 
     [Fact]
+    public void CreateOnAWindowClearsTheReservedHeadToo()
+    {
+        // Stock stage 3 opens the output FileMode.Create, so everything below 0x10000 starts as a
+        // hole and only the finaliser's own bytes end up there. In place nothing else truncates
+        // the file, so Create on a window has to clear the whole file, not just the window —
+        // otherwise a rebuild over an existing package leaves the previous package's head bytes
+        // wherever the finaliser does not write, which is a byte-parity divergence against --spool.
+        InPlaceImage.Enabled = true;
+        string pkg = Path.Combine(Path.GetTempPath(), "ip-" + Guid.NewGuid().ToString("N") + ".pkg");
+        File.WriteAllBytes(pkg, [.. Enumerable.Repeat((byte)0xFF, 200000)]);
+        string window = InPlaceImage.SpoolPathFor("/tmp/spool.dat", pkg, prepositioned: true);
+
+        using (Stream s = InPlaceImage.Open(window, FileMode.Create, FileAccess.ReadWrite,
+                                            FileShare.None, 4096, FileOptions.None))
+            s.Write([1, 2, 3, 4], 0, 4);
+
+        byte[] all = File.ReadAllBytes(pkg);
+        Assert.Equal(InPlaceImage.OuterPfsOffset + 4, all.Length);
+        Assert.Equal(new byte[InPlaceImage.OuterPfsOffset], all[..(int)InPlaceImage.OuterPfsOffset]);
+        File.Delete(pkg);
+    }
+
+    [Fact]
     public void OpenFallsThroughToARealFileForOrdinaryPaths()
     {
         string path = Path.Combine(Path.GetTempPath(), "plain-" + Guid.NewGuid().ToString("N"));
