@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### A build needs about half the free space it used to
+
+The inner `pfs_image.dat` is now written directly into the package at `0x10000` and hashed and
+encrypted in place, instead of being spooled to `--temp-dir` at full size and then copied in. Peak
+free space needed falls from roughly **2x** the finished package to **1x**, and `--temp-dir` holds
+only the CNT and the NAPS sidecar. Measured on the test fixture: peak temp usage 65,641 bytes
+against a 19,720,394-byte package — 0.3%, where it used to be about 100%.
+
+This is a pure space optimisation and is asserted to be one: the suite builds the same source both
+ways and requires byte-identical packages, on a plain layout, on a relocating layout, and on the
+fallback path. `--spool` restores the old behaviour and is that oracle.
+
+When the layout optimiser selects a moving plan, the permutation is replayed inside the package
+rather than through a second file. If the displaced bytes would not fit in memory (512 MB by
+default) the build falls back to a spool, says so, and produces the same package.
+
+Needs `./fpkg patch`: this adds IL sites 17-24. Without them the build spools and tells you so.
+
+
 ## fpkg 0.6.9-fix1
 
 Fixes several defects in 0.6.9 against the same LibProsperoPkg 0.6.9. **Re-run `./fpkg patch` after

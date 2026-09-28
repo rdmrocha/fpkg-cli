@@ -97,6 +97,28 @@ Content ID, title and version are read from `sce_sys/param.json` when not given.
 
 The output is a debug (FIH) image. Installing it needs a console that accepts one.
 
+### Disk space: a build needs about the package's own size
+
+The inner `pfs_image.dat` is written straight into the package it belongs in, at offset `0x10000`,
+and then hashed and encrypted **in place**. Nothing is copied. A build therefore needs roughly the
+finished package's size in free space on the `--out` volume, and `--temp-dir` holds only the CNT
+and the NAPS sidecar — tens of megabytes, not gigabytes.
+
+Every earlier release spooled the whole inner image into `--temp-dir` first and then copied it,
+encrypted, into the package, so both files were full size at the same moment and a build needed
+**twice** the package size. Measured on the test fixture: peak `--temp-dir` usage fell from about
+the package's own size to 0.3% of it.
+
+`--spool` restores the old two-file behaviour. It is worth knowing about for two reasons: it is the
+fallback the build takes on its own if a layout relocation will not fit in memory (it says so, and
+the package is unaffected), and it is the oracle the in-place path is tested against — the suite
+asserts the two produce byte-identical packages, on a plain layout, on a relocating layout, and on
+the fallback itself. If you ever have reason to distrust a package, building it again with
+`--spool` and comparing hashes is a meaningful check.
+
+The single-file build needs a patched library: run `./fpkg patch`. Without it the build says so and
+spools.
+
 Every build ends with two checks. The first is a structural look at the finished file — container type, signed byte, outer-PFS mode, seed marker. The second is the library's own quick verifier: segment ranges, CNT and entry digests, **PlayGo layout**, the outer superblock ICV, the NAPS layout, inner inode metadata and the SI directory. It costs about a second on a 650 MB package, and if it finds anything the build fails — the package is still written, so you can inspect it, but it is not sound. `--no-verify` skips both.
 
 The GUI runs only the first of those after a build, so a package it reports as verified has not had its PlayGo map checked. That is worth knowing if you compare the two.

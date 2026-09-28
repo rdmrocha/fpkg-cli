@@ -456,7 +456,27 @@ Traced every file in `--temp-dir` through an identical 679 MB build:
 | `…cnt.tmp` | **644,022,272** | **47,775,744** |
 | **peak temp, logical** | **1.154 GiB** | **0.599 GiB** (**-48%**) |
 
-0.6.2 preallocated the CNT temp file to the *final package size* and filled it late; 0.6.4 streams it, so it never holds more than a working window. That is `Util.BuildFileIO` (buffered, coalesced sequential writes), `Util.RecoverableFileStream` and `Util.BoundedBuildCache` — the whole of the 0.6.2 -> 0.6.4 lib diff, plus the recovery types above. No new `ProsperoBuildOptions` properties.
+0.6.2 preallocated the CNT temp file to the *final package size* and filled it late; 0.6.4 streams it, so it never holds more than a working window.
+
+> **This table now describes `--spool` builds only.** The default build writes the inner image
+> straight into the package and transforms it in place (sites 17-24), so `…pfs_image.dat` is not in
+> `--temp-dir` at all: measured peak temp is 65,641 bytes against a 19,720,394-byte package (0.3%),
+> against ~100% here. The exFAT argument below no longer applies to the default path, because the
+> big file is not on the temp volume — it is in the output file. What remains in `--temp-dir` is the
+> CNT and the NAPS sidecar.
+>
+> Two things worth knowing if you go looking. **The layout relocation pass is unreachable from a
+> default build**: the CLI keeps `--playgo-fix` on, which vetoes `EnableOuterBlockCoalescing` and
+> `EnableRelocationAlignmentAdjustment`, and without the filler padding site 12 creates the
+> optimiser finds zero reclaimable slack — verified on four source shapes, including one with eight
+> valid ELF executables, a keystone and 23 MB of dedup gaps, where every candidate saved 0 bytes.
+> The hidden `--force-coalescing` and `--layout-savings <bytes>` flags exist to make that path
+> reachable from the test suite, and only from it; `--force-coalescing` makes a *worse* package for
+> the reason given above. **Concurrent builds must not share one `--temp-dir`**: the
+> abandoned-staging recovery each build runs at startup scans that directory for records belonging
+> to other builds, and the symptom is a PlayGo filler disappearing mid-build ("no extent was derived
+> for language chunk 1"). That is pre-existing and unrelated to the in-place work; it reproduces
+> with `--spool`. That is `Util.BuildFileIO` (buffered, coalesced sequential writes), `Util.RecoverableFileStream` and `Util.BoundedBuildCache` — the whole of the 0.6.2 -> 0.6.4 lib diff, plus the recovery types above. No new `ProsperoBuildOptions` properties.
 
 One caveat on how to read that table. Measured by **allocated blocks** (`du`), both releases peak at ~0.61 GiB on APFS, because 0.6.2's oversized `cnt.tmp` is *sparse*: 644,022,272 bytes logical against 64 KiB allocated for the whole sampled window. **exFAT has no sparse files**, so on the drives this matters on the 0.6.2 reservation was charged in full and the saving is the real 48%. On APFS you mostly get it back as a smaller free-space requirement rather than smaller live usage.
 
