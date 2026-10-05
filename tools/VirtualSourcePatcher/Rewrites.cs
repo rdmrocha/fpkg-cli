@@ -347,15 +347,17 @@ internal static class Rewrites
     }
 
     /// <summary>
-    /// Site 9. The Write delegate g__BuildSdkOverriddenSelf hands to its replacement FSFile opens
-    /// the ORIGINAL executable by path, to copy everything up to the .sceversion patch offset:
+    /// Site 9. The Write delegate g__BuildNormalizedSelf hands to its replacement FSFile opens
+    /// the ORIGINAL executable by path, to copy everything up to the rewrite plan's patch offset:
     ///
     ///     using FileStream source = BuildFileIO.Open(sourcePath, Open, Read, Read, 1 MiB, Sequential);
-    ///     CopyPrefix(source, destination, patchOffset);
+    ///     CopySelfPrefix(source, destination, length, plan.RewriteMagic);
     ///
     /// For a container source that path is the "ffpfsc:&lt;handle&gt;:/..." scheme, so the open throws.
-    /// It is reached only when an SDK override is set — ConvertLooseElfExecutables is a no-op
-    /// without one — which is why it stayed invisible until --sdk-version gained a default.
+    /// Before 0.6.11 this was reached only under an SDK override; 0.6.11 normalises every SELF
+    /// (legacy magic, misplaced .sceversion trailer), so any SELF that needs it reaches it.
+    /// CopySelfPrefix seeks to offset 4 when it rewrites the magic, which the container stream
+    /// supports.
     ///
     /// Six pushed arguments and a String first parameter, exactly like the FSFile constructor, so
     /// both go through the same rewrite. Inert for folder sources: OpenOrFile falls back to a
