@@ -1,6 +1,62 @@
 # Changelog
 
-## Unreleased
+## fpkg 0.6.11
+
+Tracks LibProsperoPkg 0.6.11. **Re-run `./fpkg patch` after updating**: two IL sites moved. A
+patched copy is keyed to the hash of the library it came from, so until you re-patch, the new
+release runs unpatched and `fpkg` says so.
+
+### PlayGo: the library keeps a dump's own map, and fpkg stops repairing over it
+
+0.6.11 can keep a source's PlayGo map. Given `playgo-chunk.dat`, `playgo-hash-table.dat` and
+`playgo-ficm.dat` that put files in their own chunks — which a dump of a Sony-built package has —
+it retains every file's chunk, the labels and the language masks, and rebuilds only the physical
+extents from where the files landed in the new image. That is what fpkg's PlayGo repair
+approximates, done properly, so when the library will do it fpkg now steps aside:
+
+- those four files are no longer set aside, no fillers are staged, and the post-build
+  rederivation does not run;
+- the 31 language fillers the dump already carries are kept distinct, block-aligned and last
+  (sites 10, 11, 12, 15), which the library does not do — without it all 31 share one stored copy
+  and one extent;
+- what the library leaves unfinished is completed on top of its tables: the source's own
+  `playgo-scenario.json` is restored (the library re-serialises it), the same document is added to
+  the SI, and `naps_meta_3xx` and `playgo-chunk.crc` are rebuilt from the library's extents.
+
+fpkg asks the library itself, through its own `ResolvePlayGoConfiguration`, rather than
+re-implementing the rules, and says which path a build took. A language subset
+(`--playgo-languages`) overrides the source map in the library, so the repair applies there, as it
+does for sources without usable tables. `--force-playgo-fix` applies the repair regardless.
+
+The oracle is a round trip: a package built by the repair, extracted and rebuilt through the
+library's source-map mode, comes out **byte-identical**.
+
+A source whose `playgo-languages/` is exactly what fpkg would stage is now reused in place.
+Previously such a dump could only be built with `--playgo-fillers-force`, which deleted it.
+
+### What the library now does itself
+
+Each of these was measured byte-identical before fpkg's own copy was removed or narrowed.
+
+- **SELF normalisation.** 0.6.11 normalises `eboot.bin`, every `*.prx`, `fakelib/` and
+  `sce_module/` in an Application build, exactly as `SelfNormalize` did. fpkg now covers only the
+  executables outside that scope; `--force-self-normalize` covers everything again.
+- **FICM slot order.** `ProsperoPlayGo.BuildFileMap` sorts the hash table and FICM together and
+  replaces fpkg's own slot ordering.
+- **Source exclusions.** `*.gp4`/`*.gp5`, the root `ampr_emu.index` and the two fake libraries are
+  dropped by the library, so the quarantine no longer moves them. 0.6.11 also drops the root
+  `entitlements.txt`, `entitlement_key.dat` and `decrypted/`.
+
+### Patcher
+
+Sites 8 and 9 follow `BuildSdkOverriddenSelf` to its replacement, `BuildNormalizedSelf`, whose
+copy delegate now captures a rewrite plan. 0.6.11 runs it for every SELF, not only under
+`--sdk-version`, so a container source reaches it on ordinary builds. All 24 sites apply; the
+single-file build's byte-parity tests pass unchanged.
+
+### Flags
+
+Added: `--force-playgo-fix`, `--force-self-normalize`.
 
 ### `fpkg merge`: rebuild a full package from a base and an LIH patch
 
@@ -15,10 +71,11 @@ The merge is a block copy driven by the patch's own `common/update-relocinfo.dat
 The base is checked against the PFS-area digest the patch records for it, and every offset in the
 patch is bounds-checked before anything is written. No library patch is needed.
 
-Known issue: LibProsperoPkg cannot yet read the inner filesystem of a merged package — `verify
---quick` reports a Kraken decode failure and `extract` fails. The package itself is sound (Sony's
-`img_verify` integrity check passes); the library locates NAPS spans by their encryption tweak,
-which relocation leaves pointing one block off.
+Known issue, probably resolved: LibProsperoPkg 0.6.9 could not read the inner filesystem of a
+merged package — `verify --quick` reported a Kraken decode failure and `extract` failed, though the
+package itself is sound (Sony's `img_verify` integrity check passes). It located NAPS spans by their
+encryption tweak, which relocation leaves pointing one block off. 0.6.11 locates them by physical
+offset instead, which is exactly that fix, but it has not been re-checked on a merged package.
 
 ### A build needs about half the free space it used to
 

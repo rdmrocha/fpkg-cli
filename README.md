@@ -6,13 +6,13 @@ Builds PS5 debug FPKG packages — and it does two things the official tooling d
 
 **It runs on macOS and Linux**, arm64 or x64. The packaging engine is **LibProsperoPkg by Drakmor**, reverse-engineered from Sony's own Windows publishing tools; this is a command-line front end for it, because the official GUI is Windows-only WinForms and cannot run here.
 
-This is **fpkg 0.6.9**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.9 belongs with a LibProsperoPkg 0.6.9 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
+This is **fpkg 0.6.11**. The version number tracks the LibProsperoPkg release it is built and tested against, so `fpkg` 0.6.11 belongs with a LibProsperoPkg 0.6.11 folder. `./fpkg version` prints both, side by side, for whatever you actually have.
 
 Nothing in this zip is Drakmor's work, Sony's, or RAD's. You supply those yourself.
 
 ## What you need
 
-- **A LibProsperoPkg release** (0.6.9 or compatible) — unzip it somewhere; that folder is your working directory.
+- **A LibProsperoPkg release** (0.6.11 or compatible) — unzip it somewhere; that folder is your working directory.
 - **The .NET 10 runtime**: `brew install dotnet`.
 - macOS or Linux, arm64 or x64. One `fpkg-cli-<version>.zip` runs on all four: it is portable IL, not a per-platform build.
 - **Optional but worth it: a RAD Oodle library**, version 2.9.16. It makes builds roughly three times faster. Get it *before* you patch — see "Optional: the native Oodle encoder" below for the exact file names to look for.
@@ -134,7 +134,7 @@ A retail dump used as-is produces a package the console refuses to run. Three fi
 | file | why it has to go |
 |---|---|
 | `license.dat`, `license.info` | the retail licence suppresses the debug licence `fpkg` generates, and the package will not launch |
-| `playgo-chunk.dat`, `playgo-hash-table.dat`, `playgo-ficm.dat` | they describe the *old* image layout; if present they win over the ones regenerated for your new PFS, including over `--playgo` |
+| `playgo-chunk.dat`, `playgo-hash-table.dat`, `playgo-ficm.dat`, `playgo-scenario.json` | only when LibProsperoPkg will not use them. When they map files to their own chunks — a dump of a Sony-built package does — 0.6.11 keeps that map and rebuilds its extents for the new image, so they stay; otherwise they describe the old layout and `fpkg` derives a new one |
 | `origin-param.json`, `target-param.json` | not package entries at all — left in place they ride into the inner filesystem as junk files |
 
 `--retain-sce-sys` opts out. You need it when building an **exported add-on template** (see below), whose licence and PlayGo files are deliberate inputs rather than stale ones; `fpkg` detects that case and tells you rather than quietly deleting them.

@@ -173,6 +173,70 @@ Once `./fpkg patch` has been run with an Oodle library present, this same comman
 
 Not yet exposed by the CLI: `SdkVersionOverride`, `PublishingToolsLibraryPath`.
 
+## Upstream 0.6.11
+
+No 0.6.10 was seen; everything below is 0.6.9 -> 0.6.11. The library stays `1.2.0` (commit
+`996f47c` -> `d7090eb`); 23 decompiled files changed, +1,734 / -454. The GUI gained a selective
+extraction tree and a PlayGo mode switch (keep the source layout, or generate for chosen
+languages), which map to the two new options below.
+
+### NAPS data blocks are encrypted with their own tweak
+
+`ProsperoOuterPfsBuilder` now computes `BlockSectors` for every outer block: signed blocks keep
+`bit 47 | block index`, but each block of `pfs_image.dat` takes `TweakIdxStart + n` from
+`naps_pkg_layout.dat`. The readers (`ProsperoOuterPfsDecryptReader`, the archive's decrypting
+stream, `ProsperoOuterPfsImage.Transform`) take the same map. And `ProsperoNapsSpan.StoredOffset`
+is now the physical compressed offset instead of `tweak * 64 KiB + (offset & 0xFFFF)`. That second
+change is precisely the root cause recorded for merged LIH packages being unreadable; not yet
+re-checked on one.
+
+### PlayGo keeps a source's own map
+
+`ProsperoBuildOptions.PreserveSourcePlayGoLayout` (default true, publisher pipeline only) and
+`OverrideSourcePlayGoLanguages`. `ResolvePlayGoConfiguration` gained `preserveSourceLayout` and
+`languageMaskOverride`, and returns a `SourceLayout`: per-file chunk ids read from the source
+FLT/FICM pair (hashed with the seeds stored in the source FLT header) or from GP5 chunk attributes,
+plus chunk labels and language masks. It is null when every file maps to chunk 0, when the
+tables are incomplete, or when a language subset is requested. With a layout,
+`BuildMappedExtents` partitions the rebuilt image from the real placements, a 64 KiB block shared
+by two chunks is listed in both, and `BuildMappedChunkDat` writes the table. `BuildFileMap` sorts
+the hash table and FICM together, by hash. This is what the CLI's PlayGo repair approximated; see
+the changelog for how the two now divide the work.
+
+What it does NOT do, measured on a round trip: content de-duplication still collapses the 31
+identical zero fillers onto one stored copy (3 extents instead of 33), the source scenario JSON
+is re-serialised compactly with `chunkSupportedLanguages`/`chunkDefaultLanguage` added, the SI
+gets no `playgo-scenario.json`, and `naps_meta_3xx` keep two records instead of one per
+extent-owning chunk. The CLI finishes those.
+
+Also: `ExtractRebuildSourceFiles` now keeps `playgo-hash-table.dat` and `playgo-ficm.dat`, so an
+extracted package carries a usable source map; the generated layout
+(`BuildLanguageChunkLayout`, `BuildAutomaticFileChunkIds`, `BuildFicm`) is unchanged.
+
+### SELF normalisation moved into the library
+
+`BuildSdkOverriddenSelf` became `BuildNormalizedSelf(FSFile, ulong?)` over a new
+`ProsperoFself.TryBuildSelfRewritePlan`: a legacy `0x1D3D154F` magic becomes `0xEEF51454`, and a
+`.sceversion` trailer found up to 15 bytes before `Header.FileSize` is shifted onto it with zero
+padding. It now runs for every SELF in an Application build, with or without an SDK override,
+over the same scope as before: root `eboot.bin`, every `*.prx`, `fakelib/`, `sce_module/`.
+
+### Smaller
+
+- Root `entitlements.txt`, `entitlement_key.dat` and `decrypted/` are always excluded.
+- `ProsperoPs5FlatPathTable.HashPath` hashes UTF-8 with ASCII-only case folding and takes seeds.
+- PlayGo labels are UTF-8; GP5 output writes chunk attributes.
+- `ProsperoPackageArchive.ListExtractionFiles` and filtered `ExtractInnerFiles` /
+  `ExtractRebuildSourceFiles` overloads.
+
+### Patcher
+
+Sites 8 and 9 re-targeted: `BuildNormalizedSelf` (FSFile, 2 params) and its copy closure, which
+now holds `(sourcePath, plan)`. `CopySelfPrefix` seeks to offset 4 when it rewrites the magic,
+which the container stream supports. The other 22 sites resolve unchanged: the inner-image
+assembler, `ProsperoCntEntryPolicy`, `FSFile` and `ProsperoNapsMeta` did not change at all, and
+`BuildPublisherImage` / `BuildForPackageToFile` changed only around the sites.
+
 ## Upstream 0.6.9
 
 Release notes: generation of language files from playgo-scenario.json; PlayGo configuration validation improved. Both true, and both understate it — this release rebuilds PlayGo. Library +289 lines net across 29 hunks; the GUI changed by three lines plus strings.
