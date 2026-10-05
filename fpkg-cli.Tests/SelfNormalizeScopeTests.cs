@@ -68,7 +68,7 @@ public class SelfNormalizeScopeTests
         WriteSelf(source, "bin/old.elf", 0x2400, early: 0, legacy: true);
 
         string split = SyntheticPackage.BuildAt(source, "selfsplit",
-            ["--temp-dir", Directory.CreateTempSubdirectory("selfsplit-t").FullName]);
+            ["--extra-self-normalize", "--temp-dir", Directory.CreateTempSubdirectory("selfsplit-t").FullName]);
         string forced = SyntheticPackage.BuildAt(source, "selfforced",
             ["--force-self-normalize", "--temp-dir", Directory.CreateTempSubdirectory("selfforced-t").FullName]);
 
@@ -80,16 +80,16 @@ public class SelfNormalizeScopeTests
     /// unknown flag would hand a script the default it asked to avoid.
     /// </summary>
     [Fact]
-    public void TheOldFlagNameIsRefusedWithThePointerToTheNewOne()
+    public void TheOldFlagIsRefusedWithTheReason()
     {
         var (exit, log) = SyntheticPackage.RunFpkg(
             ["build", "--source", "/nonexistent", "--out", "/nonexistent-out", "--no-self-normalize"]);
         Assert.Equal(1, exit);
-        Assert.Contains("renamed --no-extra-self-normalize", log);
+        Assert.Contains("--no-self-normalize is gone", log);
     }
 
     [Fact]
-    public void TheNewFlagSkipsOnlyFpkgsPart()
+    public void ByDefaultOnlyTheLibraryNormalises()
     {
         string source = Directory.CreateTempSubdirectory("selfextra").FullName;
         Directory.CreateDirectory(Path.Combine(source, "sce_sys"));
@@ -99,13 +99,13 @@ public class SelfNormalizeScopeTests
 
         var (exit, log) = SyntheticPackage.RunFpkg(
             ["build", "--source", source, "--out", Directory.CreateTempSubdirectory("selfextra-o").FullName,
-             "--temp-dir", Directory.CreateTempSubdirectory("selfextra-t").FullName, "--no-extra-self-normalize"]);
+             "--temp-dir", Directory.CreateTempSubdirectory("selfextra-t").FullName]);
         Assert.True(exit == 0, log);
         Assert.DoesNotContain("self:   normalised", log);
 
         (exit, log) = SyntheticPackage.RunFpkg(
             ["build", "--source", source, "--out", Directory.CreateTempSubdirectory("selfextra-o2").FullName,
-             "--temp-dir", Directory.CreateTempSubdirectory("selfextra-t2").FullName]);
+             "--temp-dir", Directory.CreateTempSubdirectory("selfextra-t2").FullName, "--extra-self-normalize"]);
         Assert.True(exit == 0, log);
         Assert.Contains("normalised 1 executable(s) the way the Windows SDK does: bin/tool.self", log);
     }
