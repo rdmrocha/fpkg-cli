@@ -239,7 +239,8 @@ internal static class Program
                                   costs about a second on a 650 MB package; a failure fails the
                                   build, though the package is still written so it can be
                                   inspected.
-          --no-playgo-fix         do NOT repair PlayGo. The repair is ON by default: it stages
+          --no-playgo-fix         do NOT repair PlayGo. The repair is ON by default, unless the
+                                  library keeps the source's own PlayGo map (see below): it stages
                                   the 31 playgo-languages/NN-xx-XX.bin fillers so every language
                                   chunk owns a real file, block-aligns them, and derives the
                                   extent table from the measured layout instead of computing it.
@@ -247,6 +248,15 @@ internal static class Program
                                   are, which strands payload inside language chunks. It also
                                   forces --no-coalescing and --no-relocation-align, because the
                                   layout optimiser would otherwise reclaim the padding.
+                                  When the source carries playgo-chunk.dat, playgo-hash-table.dat
+                                  and playgo-ficm.dat mapping files outside chunk 0 (a dump, or a
+                                  package extracted by fpkg extract), LibProsperoPkg 0.6.11 keeps
+                                  that map and rebuilds its extents itself; those files are then
+                                  NOT set aside, and this repair is skipped. A language subset
+                                  (--playgo-languages) overrides the source map, so the repair
+                                  applies again.
+          --force-playgo-fix      apply the repair even when the library would keep the source's
+                                  own PlayGo map; the source tables are set aside as before.
           --playgo-filler-zeros   1 MiB of zeros per filler, byte-identical across all 31,
                                   exactly as Sony's own generator writes them. This is the
                                   DEFAULT; the flag only states it. It needs the
@@ -257,7 +267,8 @@ internal static class Program
                                   instead. The pre-site-10 fallback: it reaches the same
                                   geometry without the patch, but it costs ~2 MB and the 31
                                   files no longer decode to what Sony's do (drift #24/#25).
-          --retain-sce-sys        keep every sce_sys file. By default license.*, playgo-*,
+          --retain-sce-sys        keep every sce_sys file. By default license.*, playgo-* (unless
+                                  the library will keep the source PlayGo map, see above),
                                   origin-param.json and target-param.json are set aside for
                                   the build and put back afterwards: a retail dump's copies
                                   override what the builder regenerates for the new image.
@@ -859,43 +870,6 @@ internal static class Program
             long.TryParse(budget, out long budgetBytes))
             FpkgVirtualSource.InPlaceImage.MaxRelocationBytes = budgetBytes;
 
-        // Fillers are written INTO the source folder and removed afterwards, the same contract
-        // the sce_sys quarantine and the media repair already use. No mirror, no hard links, no
-        // dependence on --temp-dir being on the source's volume.
-        PlayGo.PlayGoFillers.RecoverAbandoned(tempDir);
-        PlayGo.PlayGoFillers.Staged? playGoStage = null;
-        if (playGoFix)
-        {
-            // Sony's literal zeros are the default again. The incompressible per-language variant
-            // is kept behind --playgo-filler-distinct so the pre-site-10 behaviour can be
-            // recovered without rebuilding anything.
-            bool distinctFillers = flags.ContainsKey("playgo-filler-distinct");
-            if (distinctFillers && flags.ContainsKey("playgo-filler-zeros"))
-                return Fail("--playgo-filler-zeros and --playgo-filler-distinct ask for different " +
-                            "filler contents; pass at most one");
-#if HAS_VIRTUAL_SOURCE
-            // Zero fillers are byte-identical, so they are only usable with the dedup bypass the
-            // virtual-source patch carries. Without it all 31 would collapse onto one stored copy
-            // and the extent derivation would have nothing to measure. This is the same proxy the
-            // container-source path uses — it proves the loaded library carries the ffpfsc leg,
-            // which is the leg site 10 belongs to.
-            if (!distinctFillers && !VirtualSourcePatchLoaded())
-                return Fail("Sony's byte-identical zero fillers need the virtual-source patch " +
-                            "(site 10, the language-filler dedup bypass), which this LibProsperoPkg " +
-                            "does not carry. Run ./fpkg patch, or pass --playgo-filler-distinct to " +
-                            "use the incompressible per-language fillers instead.");
-#else
-            if (!distinctFillers)
-                return Fail("Sony's byte-identical zero fillers need the virtual-source patch " +
-                            "(site 10, the language-filler dedup bypass). Pass " +
-                            "--playgo-filler-distinct to use the incompressible fillers instead.");
-#endif
-            // source is UNCHANGED: the fillers land inside it and are removed on dispose.
-            playGoStage = PlayGo.PlayGoFillers.Stage(source, tempDir, distinctFillers,
-                                                     line => Console.WriteLine($"  {line}"),
-                                                     flags.ContainsKey("playgo-fillers-force"));
-        }
-
         // A PKG written inside the source tree would end up inside its own image.
         if (output.Equals(source, StringComparison.OrdinalIgnoreCase) ||
             (output + Path.DirectorySeparatorChar).StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -1149,6 +1123,83 @@ internal static class Program
             return Fail("--image-mode needs a library with ProsperoPublisherImageMode; this binary was built against an older release");
 #endif
 
+        // 0.6.11 keeps a source's own PlayGo map: given playgo-chunk.dat, playgo-hash-table.dat
+        // and playgo-ficm.dat (or GP5 chunk attributes) that assign at least one file outside
+        // chunk 0, it retains the file->chunk assignment, labels and language masks and rebuilds
+        // only the physical extents from where the files really landed. That is the library
+        // doing properly what our repair approximates, so when it will happen our repair steps
+        // aside entirely: no quarantine of those files, no fillers, no post-build rederivation.
+        // The library is asked directly rather than its rules re-implemented here.
+        // --force-playgo-fix restores our repair regardless.
+        string? sourcePlayGoMap = null;
+        string? sourcePlayGoProblem = null;
+#if LIB_HAS_PLAYGO_SOURCE_LAYOUT
+        sourcePlayGoMap = SourcePlayGoMap(source, playGo ?? new ProsperoBuildOptions().PlayGoChunkCount,
+                                          gp5Path, playGoLanguages, out sourcePlayGoProblem);
+#endif
+        bool forcePlayGoFix = flags.ContainsKey("force-playgo-fix");
+        if (forcePlayGoFix && !playGoFix)
+            return Fail("--force-playgo-fix and --no-playgo-fix contradict each other; pass at most one");
+        if (sourcePlayGoMap is not null && !forcePlayGoFix) playGoFix = false;
+
+        // In the library's source-map mode the fillers a dump already carries still need what the
+        // library does not do: their own stored copy each, block alignment and a place at the end.
+        // --no-playgo-fix means no PlayGo intervention at all, so it skips this too.
+        int sourceFillers = 0;
+        // Read now, before the builder runs: the post-build seal restores these exact bytes.
+        byte[]? sourceScenarioJson = null;
+        bool sealSourceMap = sourcePlayGoMap is not null && !playGoFix && !flags.ContainsKey("no-playgo-fix");
+        if (sealSourceMap)
+        {
+            string scenarioPath = PlayGo.PlayGoFillers.ScenarioJsonPath(source);
+            if (File.Exists(scenarioPath)) sourceScenarioJson = File.ReadAllBytes(scenarioPath);
+            sourceFillers = PlayGo.PlayGoFillers.RegisterExisting(source, line => Console.WriteLine($"  {line}"));
+            if (sourceFillers > 0 && !VirtualSourcePatchLoaded())
+                Console.WriteLine("  warning: this LibProsperoPkg lacks the virtual-source patch, so the " +
+                                  "source's identical language fillers will be stored once and share " +
+                                  "one PlayGo extent. Run ./fpkg patch.");
+        }
+        // Site 12 pads every registered filler onto its own block; the layout optimiser would
+        // reclaim that padding, so both optimiser passes stay off whenever fillers are registered.
+        bool fillersRegistered = playGoFix || sourceFillers > 0;
+
+        // Fillers are written INTO the source folder and removed afterwards, the same contract
+        // the sce_sys quarantine and the media repair already use. No mirror, no hard links, no
+        // dependence on --temp-dir being on the source's volume.
+        PlayGo.PlayGoFillers.RecoverAbandoned(tempDir);
+        PlayGo.PlayGoFillers.Staged? playGoStage = null;
+        if (playGoFix)
+        {
+            // Sony's literal zeros are the default again. The incompressible per-language variant
+            // is kept behind --playgo-filler-distinct so the pre-site-10 behaviour can be
+            // recovered without rebuilding anything.
+            bool distinctFillers = flags.ContainsKey("playgo-filler-distinct");
+            if (distinctFillers && flags.ContainsKey("playgo-filler-zeros"))
+                return Fail("--playgo-filler-zeros and --playgo-filler-distinct ask for different " +
+                            "filler contents; pass at most one");
+#if HAS_VIRTUAL_SOURCE
+            // Zero fillers are byte-identical, so they are only usable with the dedup bypass the
+            // virtual-source patch carries. Without it all 31 would collapse onto one stored copy
+            // and the extent derivation would have nothing to measure. This is the same proxy the
+            // container-source path uses — it proves the loaded library carries the ffpfsc leg,
+            // which is the leg site 10 belongs to.
+            if (!distinctFillers && !VirtualSourcePatchLoaded())
+                return Fail("Sony's byte-identical zero fillers need the virtual-source patch " +
+                            "(site 10, the language-filler dedup bypass), which this LibProsperoPkg " +
+                            "does not carry. Run ./fpkg patch, or pass --playgo-filler-distinct to " +
+                            "use the incompressible per-language fillers instead.");
+#else
+            if (!distinctFillers)
+                return Fail("Sony's byte-identical zero fillers need the virtual-source patch " +
+                            "(site 10, the language-filler dedup bypass). Pass " +
+                            "--playgo-filler-distinct to use the incompressible fillers instead.");
+#endif
+            // source is UNCHANGED: the fillers land inside it and are removed on dispose.
+            playGoStage = PlayGo.PlayGoFillers.Stage(source, tempDir, distinctFillers,
+                                                     line => Console.WriteLine($"  {line}"),
+                                                     flags.ContainsKey("playgo-fillers-force"));
+        }
+
         try
         {
             Directory.CreateDirectory(output);
@@ -1190,10 +1241,10 @@ internal static class Program
             // exercise the in-place relocation pass end to end. Never use it for a real build.
             EnableOuterBlockCoalescing =
                 !flags.ContainsKey("no-coalescing") &&
-                (!playGoFix || flags.ContainsKey("force-coalescing")),
+                (!fillersRegistered || flags.ContainsKey("force-coalescing")),
             EnableRelocationAlignmentAdjustment =
                 !flags.ContainsKey("no-relocation-align") &&
-                (!playGoFix || flags.ContainsKey("force-coalescing")),
+                (!fillersRegistered || flags.ContainsKey("force-coalescing")),
             EnableShufflePatternAnalysis = shuffleAnalysis,
             // Undocumented test hook. The layout optimiser only produces a moving plan when it
             // can reclaim more than this, and on ordinary sources it cannot, so the in-place
@@ -1218,6 +1269,11 @@ internal static class Program
 #endif
 #if LIB_HAS_PLAYGO_LANGUAGES
             PlayGoLanguageMask = playGoLanguages,
+#endif
+#if LIB_HAS_PLAYGO_SOURCE_LAYOUT
+            // Our repair and the library's source-map mode are alternatives, never both: the
+            // repair derives its own extents after the build and would overwrite the library's.
+            PreserveSourcePlayGoLayout = !playGoFix,
 #endif
             CompressInnerImage = flags.ContainsKey("compress"),
             DeterministicBuild = !flags.ContainsKey("no-deterministic"),
@@ -1261,7 +1317,24 @@ internal static class Program
         Console.WriteLine(meta.ContentId is null
             ? "Metadata: sce_sys/param.json not found — a minimal one will be generated."
             : $"Metadata loaded: {meta.ContentId}{(string.IsNullOrWhiteSpace(meta.Title) ? "" : $" — {meta.Title}")}");
-        Console.WriteLine(PlayGoStatus(source, options.PlayGoChunkCount, gp5Path));
+        if (sourcePlayGoMap is not null && !playGoFix)
+            Console.WriteLine($"PlayGo: the library keeps the source's own map ({sourcePlayGoMap}) and " +
+                              "rebuilds its extents for the new image; fpkg's PlayGo repair is not applied " +
+                              "(--force-playgo-fix applies it instead). --playgo is ignored.");
+        else
+        {
+            if (sourcePlayGoMap is not null)
+                Console.WriteLine($"PlayGo: --force-playgo-fix: the source map ({sourcePlayGoMap}) is set " +
+                                  "aside and fpkg's repair is applied instead.");
+            if (sourcePlayGoProblem is not null)
+                Console.WriteLine($"PlayGo: the source's PlayGo tables are unusable ({sourcePlayGoProblem}); " +
+                                  "they are set aside and fpkg's repair is applied.");
+            bool tablesSetAside = playGoFix && !flags.ContainsKey("retain-sce-sys")
+                && PlayGoFiles.Any(n => File.Exists(Path.Combine(source, "sce_sys", n)));
+            Console.WriteLine(tablesSetAside
+                ? "PlayGo: the source's PlayGo tables are set aside; fpkg's repair derives the layout."
+                : PlayGoStatus(source, options.PlayGoChunkCount, gp5Path));
+        }
         // Only meaningful when the count actually comes from the flag; when the source or a GP5
         // supplies it, PlayGoChunkCount is never consulted and checking it rejects good builds.
 #if !LIB_HAS_PLAYGO_LANGUAGE_CHUNKS
@@ -1352,7 +1425,8 @@ internal static class Program
         SceSysQuarantine.RecoverAbandoned(tempDir, source, recoveryKey);
         using var sceSysQuarantine = flags.ContainsKey("retain-sce-sys")
             ? null
-            : SceSysQuarantine.Apply(tempDir, source, recoveryKey);
+            : SceSysQuarantine.Apply(tempDir, source, recoveryKey,
+                                     keep: playGoFix ? null : SceSysQuarantine.PlayGoInputs);
 
         // Runs after the quarantine: the sweep can remove files this would otherwise inspect,
         // and a regenerated icon0.png must not then be swept.
@@ -1444,6 +1518,16 @@ internal static class Program
                     $"WARNING: the native Oodle encoder failed on {encoderFailures} half(es); " +
                     "output for those halves was stored UNCOMPRESSED rather than silently " +
                     "degrading. Check the Oodle library in fpkg-tools/native/.");
+        }
+
+        if (sealSourceMap)
+        {
+            Console.WriteLine();
+            if (sourceFillers > 0) Console.WriteLine(FpkgVirtualSource.PlayGoFillerDedup.Summary());
+            Console.WriteLine("Completing the library's source-map PlayGo metadata…");
+            int sealResult = PlayGo.PlayGoFixCommand.SealSourceMap(result.OutputPath, passcode,
+                                                                   sourceScenarioJson, Fail, quiet);
+            if (sealResult != 0) return sealResult;
         }
 
         if (playGoStage is not null)
@@ -1671,7 +1755,16 @@ internal static class Program
                 Console.WriteLine($"  note:   restored {restored} source file(s) from an interrupted build");
         }
 
-        internal static SceSysQuarantine Apply(string backupDirectory, string sourceFolder, string recoveryKey)
+        /// <summary>
+        /// The sce_sys files 0.6.11 reads as INPUTS when it keeps a source's PlayGo map: the three
+        /// tables give it the file->chunk assignment, and playgo-scenario.json names scenarios over
+        /// exactly those chunks. Kept out of the sweep only when the library will use them.
+        /// </summary>
+        internal static readonly string[] PlayGoInputs =
+            ["playgo-chunk.dat", "playgo-hash-table.dat", "playgo-ficm.dat", "playgo-scenario.json"];
+
+        internal static SceSysQuarantine Apply(string backupDirectory, string sourceFolder, string recoveryKey,
+                                               IReadOnlyCollection<string>? keep = null)
         {
             // Rooted at the SOURCE, not at sce_sys: PROJECT_SUFFIXES is tree-wide, and
             // eboot.bin.esbak and sce_module/libc.prx.esbak are the two files a sce_sys-scoped
@@ -1683,6 +1776,7 @@ internal static class Program
             var doomed = Directory
                 .EnumerateFiles(root, "*", SearchOption.AllDirectories)
                 .Where(path => Excluded(Path.GetRelativePath(root, path)))
+                .Where(path => keep is null || !IsKept(Path.GetRelativePath(root, path), keep))
                 .ToList();
             if (doomed.Count == 0) return new SceSysQuarantine(root, quarantine, active: false);
 
@@ -1710,6 +1804,15 @@ internal static class Program
                 $"  source: set aside {moved.Count} file(s) Sony's generator also excludes: " +
                 string.Join(", ", moved));
             return new SceSysQuarantine(root, quarantine, active: true);
+        }
+
+        /// <summary>A direct child of sce_sys/ named in <paramref name="keep"/>.</summary>
+        internal static bool IsKept(string relativePath, IReadOnlyCollection<string> keep)
+        {
+            string[] parts = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return parts.Length == 2
+                && string.Equals(parts[0], "sce_sys", StringComparison.OrdinalIgnoreCase)
+                && keep.Contains(parts[1], StringComparer.OrdinalIgnoreCase);
         }
 
         private static int Restore(string quarantine, string root)
@@ -2627,6 +2730,39 @@ internal static class Program
     /// status line and the zero-extent guard so the two cannot disagree, which they did: the
     /// guard was rejecting a fallback count the build was never going to use.
     /// </summary>
+#if LIB_HAS_PLAYGO_SOURCE_LAYOUT
+    /// <summary>
+    /// Whether 0.6.11 will keep this source's own PlayGo map, decided by the library's own
+    /// resolver with the same arguments the build passes it. Null when it will not: no tables,
+    /// tables that map every file to chunk 0, or a language subset (which the library treats as
+    /// an explicit override of the source layout). Unusable tables are reported in
+    /// <paramref name="problem"/> rather than thrown, so the caller can set them aside and fall
+    /// back to its own repair instead of failing a build the old pipeline would have completed.
+    /// </summary>
+    internal static string? SourcePlayGoMap(string source, int chunkCount, string? gp5Path,
+                                            ulong languages, out string? problem)
+    {
+        problem = null;
+        if (languages != ulong.MaxValue) return null;
+        try
+        {
+            var config = ProsperoPkgBuilder.ResolvePlayGoConfiguration(
+                source, chunkCount,
+                gp5Path is null ? ProsperoSourceMode.Folder : ProsperoSourceMode.Gp5Project, gp5Path,
+                preserveSourceLayout: true, languageMaskOverride: null);
+            return config.SourceLayout is { } layout
+                ? $"{layout.Labels.Count} chunk(s), {layout.FileChunks.Count} mapped file(s)"
+                : null;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or ArgumentException
+                                       or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            problem = ex.Message;
+            return null;
+        }
+    }
+#endif
+
     private static bool PlayGoCountComesFromFlag(string source, string? gp5Path)
     {
         var sceSys = Path.Combine(source, "sce_sys");

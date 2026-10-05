@@ -172,10 +172,33 @@ internal static class PlayGoFillers
 
         public void Dispose()
         {
+            // Empty for reused fillers: they belong to the source and stay.
+            if (_languages.Length == 0) return;
             try { if (System.IO.Directory.Exists(_languages)) System.IO.Directory.Delete(_languages, recursive: true); }
             catch (IOException) { }
             try { if (File.Exists(_marker)) File.Delete(_marker); } catch (IOException) { }
         }
+    }
+
+    /// <summary>
+    /// True when <paramref name="languages"/> holds exactly the files <see cref="Stage"/> would
+    /// write -- the same names and the same bytes, nothing more and nothing less.
+    /// </summary>
+    internal static bool MatchesStaging(string source, string languages, bool distinct)
+    {
+        var order = Order(DefaultLanguageCode(source));
+        var expected = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        for (int chunk = 1; chunk <= order.Count; chunk++)
+            expected[FileName(chunk, order[chunk - 1])] = Payload(chunk, order[chunk - 1], distinct);
+        var present = System.IO.Directory.EnumerateFileSystemEntries(languages).ToList();
+        if (present.Count != expected.Count) return false;
+        foreach (string path in present)
+        {
+            if (!expected.TryGetValue(Path.GetFileName(path), out byte[]? bytes) || !File.Exists(path)) return false;
+            if (new FileInfo(path).Length != bytes.Length) return false;
+            if (!File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes)) return false;
+        }
+        return true;
     }
 
     /// <summary>Removes a filler directory left behind by a killed run.</summary>
@@ -196,6 +219,34 @@ internal static class PlayGoFillers
         }
     }
 
+    /// <summary>
+    /// Registers the language fillers a source ALREADY carries -- a dump of a Sony-built package
+    /// has all 31 -- with the same allow-list staging uses, so sites 10, 11, 12 and 15 keep them
+    /// distinct, block-aligned and last exactly as for fillers this tool writes. Used when
+    /// LibProsperoPkg keeps the source's own PlayGo map: the map assigns each filler its language
+    /// chunk, but the library's content de-duplication would store all 31 identical files once and
+    /// leave every language chunk sharing a single extent, where Sony's package gives each its own.
+    /// Nothing is written or removed. Returns the number registered.
+    /// </summary>
+    internal static int RegisterExisting(string source, Action<string>? log = null)
+    {
+        string languages = Path.Combine(source, Directory);
+        FpkgVirtualSource.PlayGoFillerDedup.Reset();
+        if (!System.IO.Directory.Exists(languages)) return 0;
+        int skipped = 0;
+        foreach (string path in System.IO.Directory.EnumerateFiles(languages, "*.bin").Order(StringComparer.Ordinal))
+        {
+            try { FpkgVirtualSource.PlayGoFillerDedup.Register($"{Directory}/{Path.GetFileName(path)}"); }
+            catch (ArgumentException) { skipped++; }
+        }
+        int count = FpkgVirtualSource.PlayGoFillerDedup.Count;
+        if (count > 0)
+            log?.Invoke($"kept the source's {count} language filler(s) in {languages} distinct and " +
+                        "block-aligned (dedup bypass)" +
+                        (skipped > 0 ? $"; {skipped} file(s) there are not in the filler shape and were left alone" : ""));
+        return count;
+    }
+
     internal static Staged Stage(string source, string backupDirectory, bool distinct,
                                  Action<string>? log = null, bool force = false)
     {
@@ -203,6 +254,19 @@ internal static class PlayGoFillers
         // describing files we did not place, and deleting them afterwards would destroy the
         // user's own data.
         string languages = Path.Combine(source, Directory);
+        // Checked before --playgo-fillers-force: identical fillers never need regenerating.
+        // A dump of a Sony-built package already carries all 31, byte for byte what this would
+        // write. Those are reused where they are and never deleted: nothing has to be generated,
+        // and the user's own files are not ours to remove.
+        if (System.IO.Directory.Exists(languages) && MatchesStaging(source, languages, distinct))
+        {
+            FpkgVirtualSource.PlayGoFillerDedup.Reset();
+            foreach (string path in System.IO.Directory.EnumerateFiles(languages).Order(StringComparer.Ordinal))
+                if (!distinct) FpkgVirtualSource.PlayGoFillerDedup.Register($"{Directory}/{Path.GetFileName(path)}");
+            log?.Invoke($"reusing the source's own {Order(DefaultLanguageCode(source)).Count} language " +
+                        $"filler(s) in {languages}, which are exactly what would be staged; they are left in place");
+            return new Staged(languages: "", marker: "");
+        }
         if (force && System.IO.Directory.Exists(languages))
         {
             // Destructive and therefore explicit: only ever reached via --playgo-fillers-force,

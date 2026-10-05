@@ -322,6 +322,51 @@ internal static class PlayGoRebuild
     }
 
     /// <summary>
+    /// Reads the extent ownership back out of a <c>playgo-chunk.dat</c> the LIBRARY wrote, for the
+    /// one consumer that needs it: <see cref="BuildNapsMeta300"/>. Only the shape the
+    /// <c>naps_meta</c> format was measured on is accepted -- chunk 0 owning the first and last
+    /// extents, every other extent owned by exactly one chunk, and the chunks that own one being
+    /// 1..K with one extent each. Anything else returns null with the reason, so the caller leaves
+    /// the library's records alone rather than guessing a format nobody has seen.
+    /// </summary>
+    internal static Layout? FromChunkDat(byte[] chunkDat, out string? unsupported)
+    {
+        var plgx = Plgx.Parse(chunkDat);
+        unsupported = null;
+        var owner = new int[plgx.Extents.Count];
+        Array.Fill(owner, -1);
+        for (int c = 0; c < plgx.Chunks.Count; c++)
+            foreach (uint e in plgx.Chunks[c].ExtentRefs)
+            {
+                if (e >= owner.Length) { unsupported = $"chunk {c} references extent {e}, past the table"; return null; }
+                if (owner[e] >= 0) { unsupported = $"extent {e} is shared by chunks {owner[e]} and {c}"; return null; }
+                owner[e] = c;
+            }
+        if (owner.Length < 2 || owner[0] != 0 || owner[^1] != 0)
+        {
+            unsupported = "chunk 0 does not own both the first and the last extent";
+            return null;
+        }
+        if (Array.IndexOf(owner, -1) is int orphan and >= 0)
+        {
+            unsupported = $"extent {orphan} belongs to no chunk";
+            return null;
+        }
+        var owning = owner.Where(c => c != 0).ToList();
+        if (owning.Count != owning.Distinct().Count())
+        {
+            unsupported = "a non-zero chunk owns more than one extent";
+            return null;
+        }
+        if (!owning.Order().SequenceEqual(Enumerable.Range(1, owning.Count)))
+        {
+            unsupported = "the chunks that own an extent are not numbered 1..K";
+            return null;
+        }
+        return new Layout([], [.. plgx.Extents], owner, owning.Count);
+    }
+
+    /// <summary>
     /// Rewrites a parsed <c>playgo-chunk.dat</c> to describe <paramref name="layout"/>. The header
     /// and every chunk record are the originals with only the named fields patched — see
     /// <see cref="Plgx"/> for why.

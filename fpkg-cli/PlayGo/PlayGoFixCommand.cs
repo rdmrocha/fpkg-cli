@@ -140,6 +140,76 @@ internal static class PlayGoFixCommand
         return 0;
     }
 
+    /// <summary>
+    /// The post-build step for a build in which LibProsperoPkg 0.6.11 KEPT the source's own PlayGo
+    /// map. The library's playgo-chunk.dat, hash table and FICM are left exactly as built -- they
+    /// are the library's job and it did it. What it does not do, measured against the Windows
+    /// toolkit's output, is finished here:
+    /// <list type="bullet">
+    /// <item>CNT entry 12288 gets the source's own <c>playgo-scenario.json</c> bytes back. The
+    /// library re-serialises it (compact, plus <c>chunkSupportedLanguages</c>); a dump carries
+    /// Sony's canonical document and Sony's package ships it unchanged.</item>
+    /// <item>The SI gains <c>config/&lt;id&gt;/playgo-scenario.json</c>, the same document.</item>
+    /// <item><c>naps_meta_300/301/302/308</c> describe the library's extents: the library leaves
+    /// two records, the oracle has one per extent-owning chunk plus a terminal.</item>
+    /// <item><c>playgo-chunk.crc</c> is recomputed over the resealed package.</item>
+    /// </list>
+    /// </summary>
+    internal static int SealSourceMap(string path, string passcode, byte[]? sourceScenarioJson,
+                                      Func<string, Exception?, int> fail, bool quiet = false)
+    {
+        void Log(string line) { if (!quiet) Console.WriteLine($"  {line}"); }
+        var regions = PackageRegions.Load(path);
+        long mountImageSize = regions.CntOffset;
+        var table = CntEntryTable.Parse(regions.Cnt, passcode);
+        string contentId = CntHeader.ReadContentId(regions.Cnt);
+        byte[] chunkDat = table[PlayGoIds.ChunkDat].Payload;
+
+        if (CntReseal.FixedPointProblem(regions.Cnt, table.Physical, contentId, passcode) is string sealProblem)
+            return fail("reseal pre-flight failed. " + sealProblem, null);
+
+        byte[] scenarioJson = sourceScenarioJson ?? table[PlayGoIds.ScenarioJson].Payload;
+        var info = ProsperoPlayGo.ValidateLayout(chunkDat, table[PlayGoIds.Ficm].Payload,
+                                                 table[PlayGoIds.HashTable].Payload, scenarioJson,
+                                                 contentId, (ulong)mountImageSize);
+        Console.WriteLine($"ok: ValidateLayout — {info.ChunkCount} chunks, {info.ScenarioCount} scenario(s), " +
+                          $"{info.ExtentCount} extents, {info.FileCount} file mappings, " +
+                          $"{info.CoveredBytes:N0} bytes covered");
+
+        var members = PlayGoRebuild.SiMembers.Read(regions.Si);
+        byte[] napsMeta300;
+        if (PlayGoRebuild.FromChunkDat(chunkDat, out string? unsupported) is { } layout)
+        {
+            napsMeta300 = PlayGoRebuild.BuildNapsMeta300(layout);
+            Log($"naps_meta_3xx: {napsMeta300.Length / 24} record(s) from the library's " +
+                $"{layout.Extents.Count} extent(s)");
+        }
+        else
+        {
+            napsMeta300 = members["common/etc/naps_meta_300.dat"];
+            Console.WriteLine($"  warning: naps_meta_3xx left as the library wrote them: this PlayGo map " +
+                              $"has a shape the record format was never measured on ({unsupported}).");
+        }
+
+        if (sourceScenarioJson is not null)
+            table[PlayGoIds.ScenarioJson].Payload = sourceScenarioJson;
+        var progress = new Progress(Log);
+        byte[] newCnt = CntReseal.Seal(regions.Cnt, table.Physical, contentId, passcode,
+                                       Announce(progress, "resealing the CNT digest chain"));
+        string staged = path + ".playgo-seal.tmp";
+        regions.WriteTo(staged, newCnt, [], flushToDisk: false);
+        byte[] si;
+        using (var mount = File.OpenRead(staged))
+            si = PlayGoRebuild.RebuildSi(regions.Si, contentId, chunkDat, napsMeta300, scenarioJson,
+                                         mount, regions.CntOffset + newCnt.Length, regions.CntOffset, Log);
+        regions.OverwriteSi(staged, newCnt.Length, si);
+        File.Move(staged, path, overwrite: true);
+        Console.WriteLine($"sealed {path}: library PlayGo map kept; " +
+                          (sourceScenarioJson is null ? "scenario JSON as built" : "source scenario JSON restored") +
+                          ", SI completed");
+        return 0;
+    }
+
     internal static class PlayGoIds
     {
         internal const uint ChunkDat = 4097;
