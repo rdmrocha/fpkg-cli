@@ -87,13 +87,12 @@ internal static class PlayGoFixCommand
 
         // ---- rebuild the three entries ---------------------------------------------------------
         var paths = layout.Files.Select(f => f.Path).ToList();
-        byte[] hashTable = ProsperoPlayGo.BuildHashTable(paths);
         // The FICM is indexed by HASH-TABLE SLOT, not by file order -- measured against the
-        // oracle, which this reproduces byte-for-byte and which no file ordering does. See
-        // PlayGoFicmOrder.
-        var slotOrder = PlayGoFicmOrder.SlotOrder(paths);
-        byte[] ficm = ProsperoPlayGo.BuildFicm(
-            [.. slotOrder.Select(i => (byte)layout.Files[i].Chunk)]);
+        // oracle, where 45 of 52 files carried another file's chunk id when it was written in file
+        // order. 0.6.11's BuildFileMap sorts the two tables together; it replaced this tool's own
+        // slot-ordering, to which it is byte-identical.
+        var (hashTable, ficm) = ProsperoPlayGo.BuildFileMap(
+            paths, [.. layout.Files.Select(f => (byte)f.Chunk)]);
         byte[] chunkDat = PlayGoRebuild.BuildChunkDat(originalChunkDat, layout, defaultLanguage);
         // NOT the library's copy. CNT entry 12288 is 3,248 bytes in both Windows-built oracles and
         // byte-identical between the two titles; the library emits 2,293. See PlayGoScenario.

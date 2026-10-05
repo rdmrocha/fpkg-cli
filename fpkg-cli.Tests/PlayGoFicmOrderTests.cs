@@ -1,13 +1,13 @@
 using System.Buffers.Binary;
-using Fpkg.Cli.PlayGo;
 using LibProsperoPkg.PlayGo;
 using Xunit;
 
 /// <summary>
 /// The FICM is indexed by hash-table slot, not by file order. Before this was understood, 45 of
 /// the reference fixture's 52 files carried another file's chunk id — including
-/// <c>Media/Metadata/global-metadata.dat</c>, declared as belonging to language chunk 4. These
-/// tests assert the invariant that failure violated.
+/// <c>Media/Metadata/global-metadata.dat</c>, declared as belonging to language chunk 4. fpkg's
+/// own slot ordering has since been replaced by 0.6.11's <c>ProsperoPlayGo.BuildFileMap</c>, which
+/// is byte-identical to it; these tests keep asserting the invariant against what fpkg now calls.
 /// </summary>
 public class PlayGoFicmOrderTests
 {
@@ -20,17 +20,13 @@ public class PlayGoFicmOrderTests
         (BinaryPrimitives.ReadInt32LittleEndian(t.AsSpan(8)),
          BinaryPrimitives.ReadInt32LittleEndian(t.AsSpan(12)));
 
-    [Theory]
-    [InlineData(1)] [InlineData(2)] [InlineData(17)] [InlineData(53)] [InlineData(120)]
-    public void IsAPermutationOfEveryFile(int n)
-    {
-        var order = PlayGoFicmOrder.SlotOrder(Paths(n));
-        Assert.Equal(n, order.Count);
-        Assert.Equal(Enumerable.Range(0, n), order.Order());
-    }
-
     [Fact]
-    public void EmptyInputIsEmpty() => Assert.Empty(PlayGoFicmOrder.SlotOrder([]));
+    public void EmptyInputIsEmpty()
+    {
+        var (table, ficm) = ProsperoPlayGo.BuildFileMap([], []);
+        Assert.Equal(0, Header(table).Size);
+        Assert.Equal(0, Header(ficm).Size);
+    }
 
     /// <summary>
     /// The invariant that matters: read the FICM at the slot the hash table puts a path in, and you
@@ -45,9 +41,7 @@ public class PlayGoFicmOrderTests
             ? byte.Parse(p.AsSpan(17, 2))
             : (byte)0;
 
-        var order = PlayGoFicmOrder.SlotOrder(paths);
-        byte[] ficm = ProsperoPlayGo.BuildFicm([.. order.Select(i => Chunk(paths[i]))]);
-        byte[] table = ProsperoPlayGo.BuildHashTable(paths);
+        var (table, ficm) = ProsperoPlayGo.BuildFileMap(paths, [.. paths.Select(Chunk)]);
 
         var (tOff, tSize) = Header(table);
         var (fOff, _) = Header(ficm);
@@ -68,8 +62,9 @@ public class PlayGoFicmOrderTests
 
     /// <summary>
     /// The premise, restated as a test: the hash table does not depend on the order it is given.
-    /// If this ever fails, the slot a path occupies depends on the caller and SlotOrder's whole
-    /// approach — locating a one-path record inside the combined table — stops being valid.
+    /// If this ever fails, the slot a path occupies depends on the caller, and the slot lookup the
+    /// invariant test above relies on — locating a one-path record inside the combined table —
+    /// stops being valid.
     /// </summary>
     [Fact]
     public void TheHashTableItselfIsOrderIndependent()
