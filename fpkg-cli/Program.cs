@@ -1741,6 +1741,34 @@ internal static class Program
                 && SceSysGenerated.Contains(name, StringComparer.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// The subset of <see cref="Excluded"/> that LibProsperoPkg 0.6.11 already drops on its own
+        /// while it builds the inner tree, at the same scope and with the same case rules, so the
+        /// quarantine has nothing to add by moving them: <c>*.gp4</c>/<c>*.gp5</c> at any depth
+        /// (skipped by the directory scan), the root <c>ampr_emu.index</c> (plus 0.6.11's
+        /// <c>entitlements.txt</c>, <c>entitlement_key.dat</c> and <c>decrypted/</c>, which
+        /// <see cref="Excluded"/> never named), and <c>fakelib/libSceAmpr.sprx</c> /
+        /// <c>libScePlayGo.sprx</c> (<c>FilterFakeLibraryDirectory</c>). Measured: a source carrying
+        /// all of them builds the identical package whether the quarantine moves them or not.
+        /// </summary>
+        internal static bool LibraryExcludes(string relativePath)
+        {
+            string[] parts = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string name = parts[^1];
+            if (name.EndsWith(".gp4", StringComparison.OrdinalIgnoreCase) ||
+                name.EndsWith(".gp5", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (parts.Length == 1)
+                return name.Equals("ampr_emu.index", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("entitlements.txt", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("entitlement_key.dat", StringComparison.OrdinalIgnoreCase);
+            if (parts[0].Equals("decrypted", StringComparison.OrdinalIgnoreCase)) return true;
+            return parts.Length == 2
+                && parts[0].Equals("fakelib", StringComparison.OrdinalIgnoreCase)
+                && (name.Equals("libSceAmpr.sprx", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("libScePlayGo.sprx", StringComparison.OrdinalIgnoreCase));
+        }
+
         private readonly string root;
         private readonly string quarantine;
         private readonly bool active;
@@ -1783,6 +1811,8 @@ internal static class Program
             var doomed = Directory
                 .EnumerateFiles(root, "*", SearchOption.AllDirectories)
                 .Where(path => Excluded(Path.GetRelativePath(root, path)))
+                // The library drops these itself; moving them out and back would only be work.
+                .Where(path => !LibraryExcludes(Path.GetRelativePath(root, path)))
                 .Where(path => keep is null || !IsKept(Path.GetRelativePath(root, path), keep))
                 .ToList();
             if (doomed.Count == 0) return new SceSysQuarantine(root, quarantine, active: false);

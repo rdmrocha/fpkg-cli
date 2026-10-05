@@ -98,4 +98,31 @@ public class SourceExclusionTests
     [InlineData("sce_sys/icon0_07.png")]
     [InlineData("Media/Modules/PS5Util.prx")]
     public void OrdinaryContentIsNeverExcluded(string path) => Assert.False(Excluded(path));
+
+    private static bool LibraryExcludes(string relative) =>
+        Fpkg.Cli.Program.SceSysQuarantine.LibraryExcludes(relative.Replace('/', System.IO.Path.DirectorySeparatorChar));
+
+    /// <summary>
+    /// What 0.6.11 drops by itself, and therefore what the quarantine no longer moves. The scope
+    /// must be exactly the library's: a rule wider than it would let a file the library keeps
+    /// escape our sweep.
+    /// </summary>
+    [Theory]
+    [InlineData("project.gp4", true)]
+    [InlineData("nested/dir/project.GP5", true)]
+    [InlineData("ampr_emu.index", true)]
+    [InlineData("AMPR_EMU.INDEX", true)]
+    [InlineData("entitlements.txt", true)]
+    [InlineData("entitlement_key.dat", true)]
+    [InlineData("decrypted/x.bin", true)]
+    [InlineData("fakelib/libsceampr.sprx", true)]
+    [InlineData("FakeLib/LIBSCEPLAYGO.SPRX", true)]
+    [InlineData("eboot.bin.esbak", false)]
+    [InlineData("data/ampr_emu.index", false)]
+    [InlineData("data/decrypted/x.bin", false)]
+    [InlineData("fakelib/deep/libsceampr.sprx", false)]
+    [InlineData("sce_module/libsceampr.sprx", false)]
+    [InlineData("sce_sys/playgo-chunk.dat", false)]
+    public void TheLibrarysOwnExclusionsAreMatchedExactly(string path, bool library) =>
+        Assert.Equal(library, LibraryExcludes(path));
 }
