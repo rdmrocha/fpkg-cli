@@ -62,6 +62,7 @@ internal static class Program
                 "patch"  => PatchCommand.Run(args.Skip(1).ToArray()),
                 "api"    => Api(args),
                 "inner-list" => InnerListCommand(args),
+                "merge"  => MergeCommand(args),
                 "playgo-fix" => PlayGo.PlayGoFixCommand.Run(args, Fail, ParseFlags),
                 var cmd  => Fail($"unknown command '{cmd}' (try: fpkg help)"),
             };
@@ -128,6 +129,13 @@ internal static class Program
                                         library in fpkg-tools/native/, skipped with a note
                                         when absent) and ffpfsc (container sources).
                                         --oodle alone FAILS if no Oodle library is present.
+          fpkg merge <base.pkg> <patch.pkg> <out.pkg> [--force]
+                                        rebuild the full package from a base PKG and an LIH
+                                        compact patch (the \x7fLIH files backports ship as),
+                                        byte-identical to Publishing Tools' `img_convert
+                                        --oformat remastered`. A block copy: nothing is
+                                        re-encrypted or re-signed. Refuses a base whose
+                                        digest is not the one the patch was built against.
           fpkg extract <file.pkg> <dir> [--passcode <32>] [--raw] [--cnt] [--si]
                                         unpack the inner PPR-PFS files (default),
                                         --raw keeps files compressed, --cnt/--si add
@@ -489,6 +497,7 @@ internal static class Program
         if (args.Length < 2) return Fail("info needs a package path");
         var path = Path.GetFullPath(args[1]);
         if (!File.Exists(path)) return Fail($"no such file: {path}");
+        if (LihMerge.IsLih(path)) return LihInfo(path);
 
         Console.WriteLine($"File:   {path}");
         Console.WriteLine($"Size:   {new FileInfo(path).Length:N0} bytes");
@@ -502,6 +511,7 @@ internal static class Program
     {
         if (args.Length < 2) return Fail("verify needs a package path");
         var pkg = Path.GetFullPath(args[1]);
+        if (File.Exists(pkg) && LihMerge.IsLih(pkg)) return Fail(LihHint(pkg));
         // verify has two argument shapes: a bare positional mode ("verify <pkg> PlaintextNoAuth")
         // and the 0.6.7 flags. ParseFlags rejects any non-"--" argument and skips its own first
         // element, so hand it the slice starting one BEFORE the first flag; with no flags at all
@@ -662,6 +672,7 @@ internal static class Program
         var pkg = Path.GetFullPath(args[1]);
         var outDir = Path.GetFullPath(args[2]);
         if (!File.Exists(pkg)) return Fail($"no such file: {pkg}");
+        if (LihMerge.IsLih(pkg)) return Fail(LihHint(pkg));
         var flags = ParseFlags(args.Skip(2).ToArray());
         var passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
 
@@ -689,6 +700,7 @@ internal static class Program
         var pkg = Path.GetFullPath(args[1]);
         var outDir = Path.GetFullPath(args[2]);
         if (!File.Exists(pkg)) return Fail($"no such file: {pkg}");
+        if (LihMerge.IsLih(pkg)) return Fail(LihHint(pkg));
         var flags = ParseFlags(args.Skip(2).ToArray());
         var passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
         Directory.CreateDirectory(outDir);
@@ -2784,6 +2796,73 @@ internal static class Program
                 "only where NAPS stored them uncompressed; pkg_span_start/pkg_span_end is the " +
                 "footprint of the NAPS spans holding the file, a superset where present " +
                 "shared with its neighbours. --range tests the span footprint.");
+        return 0;
+    }
+
+    private static string LihHint(string path) =>
+        $"{Path.GetFileName(path)} is an LIH compact patch, not a full package: it holds only the " +
+        "blocks that differ from its base. Rebuild the full package first with " +
+        "`fpkg merge <base.pkg> <patch.pkg> <out.pkg>`.";
+
+    private static int LihInfo(string path)
+    {
+        var plan = LihMerge.Read(path);
+        Console.WriteLine($"File:   {path}");
+        Console.WriteLine($"Size:   {plan.PatchLength:N0} bytes");
+        Console.WriteLine("Type:   LIH compact patch (needs its base; see `fpkg merge`)");
+        Console.WriteLine();
+        Console.WriteLine($"  FIH (target's):  0x{plan.FihOffset:x}");
+        Console.WriteLine($"  SC  (CNT):       0x{plan.ScOffset:x} + 0x{plan.ScLength:x}");
+        Console.WriteLine($"  SI  (zip):       0x{plan.SiOffset:x} + 0x{plan.SiLength:x}");
+        Console.WriteLine($"  Base digest:     {Convert.ToHexString(plan.ReferenceDigest)}");
+        Console.WriteLine($"  Target blocks:   {plan.TargetBlocks:N0} ({plan.BaseBlocks:N0} from base, " +
+                          $"{plan.PatchBlocks:N0} from patch) + SC + SI");
+        Console.WriteLine($"  Merged size:     {plan.OutputLength:N0} bytes");
+        return 0;
+    }
+
+    private static int MergeCommand(string[] args)
+    {
+        if (args.Length < 4) return Fail("merge needs <base.pkg> <patch.pkg> <out.pkg>");
+        var flags = ParseFlags(args[3..]);
+        string basePath = Path.GetFullPath(args[1]), patchPath = Path.GetFullPath(args[2]);
+        string outPath = Path.GetFullPath(args[3]);
+        foreach (var p in new[] { basePath, patchPath })
+            if (!File.Exists(p)) return Fail($"no such file: {p}");
+        if (!LihMerge.IsLih(patchPath))
+            return LihMerge.IsLih(basePath)
+                ? Fail("the arguments look swapped: the base comes first, then the LIH patch")
+                : Fail($"{Path.GetFileName(patchPath)} is not an LIH compact patch (no \\x7fLIH magic)");
+        if (outPath == basePath || outPath == patchPath) return Fail("the output must be a new file");
+        if (File.Exists(outPath) && !flags.ContainsKey("force"))
+            return Fail($"{outPath} exists (use --force to replace it)");
+
+        var plan = LihMerge.Read(patchPath);
+        LihMerge.CheckBase(plan, basePath);
+        Console.WriteLine($"Base:   {basePath}");
+        Console.WriteLine($"Patch:  {patchPath}");
+        Console.WriteLine($"Output: {outPath}");
+        Console.WriteLine($"        {plan.TargetBlocks:N0} blocks ({plan.BaseBlocks:N0} from base, " +
+                          $"{plan.PatchBlocks:N0} from patch) + SC + SI = {plan.OutputLength:N0} bytes");
+
+        string partial = outPath + ".partial";
+        File.Delete(partial);
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            LihMerge.Write(plan, basePath, patchPath, partial,
+                (done, total) => Console.Error.WriteLine($"  {done * 100 / total,3}%  {done:N0} / {total:N0}"),
+                cts.Token);
+            File.Move(partial, outPath, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(partial); } catch (IOException) { }
+            throw;
+        }
+        Console.WriteLine($"Merged in {sw.Elapsed:m\\:ss}. Check it with: fpkg verify \"{outPath}\" --quick");
         return 0;
     }
 

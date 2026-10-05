@@ -171,6 +171,16 @@ A template is the `sce_sys` inputs plus a `.gp5` project carrying the content id
 
 Add-on packages that carry data are the only kind this works on, because they are the only kind whose whole `sce_sys` lives in the package entries.
 
+### Patch-style packages (LIH)
+
+Some releases — backports in particular — ship as an **LIH compact patch**: a `.pkg` starting with `\x7fLIH` that holds only the blocks that differ from a base package. It cannot be read or extracted on its own (`fpkg info` says what it is and which base it needs). Rebuild the full package from the base and the patch:
+
+```sh
+./fpkg merge GAME-base.pkg GAME-backport.pkg GAME-merged.pkg
+```
+
+The result is byte-identical to Sony's `prospero-pub-cmd img_convert --oformat remastered`. It is a pure block copy — nothing is decrypted, re-encrypted or re-signed — so it takes about as long as copying the base once, and needs the merged package's size in free space. `merge` refuses a base whose digest is not the one the patch was built against.
+
 ## Compression levels
 
 `--kraken-level` defaults to what the backend is actually good at: **7 for Oodle, 6 for BuiltIn**. That divergence is deliberate. The built-in encoder builds a suffix trie and runs a full dynamic-programming parse at level 7 and above — 22.0 s against 5.6 s at level 6, for 1.06% smaller output. Oodle bypasses that machinery entirely, so 7 costs it almost nothing and is its optimum; 8 and 9 are slower *and* larger there.

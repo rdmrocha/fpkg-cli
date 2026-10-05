@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### `fpkg merge`: rebuild a full package from a base and an LIH patch
+
+Backports and other patch-style releases ship as an LIH compact patch (a `.pkg` starting with
+`\x7fLIH`) that only carries the blocks that differ from a base package, so `info`, `verify` and
+`extract` rejected it as "unknown magic". `fpkg merge <base.pkg> <patch.pkg> <out.pkg>` now rebuilds
+the full package, and those commands now say what the file is and point at `merge`.
+
+The merge is a block copy driven by the patch's own `common/update-relocinfo.dat`: one entry per
+64 KiB target block naming a base or patch block, followed by the patch's CNT and SI verbatim. On a
+34 GB title the output is byte-identical to Publishing Tools' `img_convert --oformat remastered`.
+The base is checked against the PFS-area digest the patch records for it, and every offset in the
+patch is bounds-checked before anything is written. No library patch is needed.
+
+Known issue: LibProsperoPkg cannot yet read the inner filesystem of a merged package — `verify
+--quick` reports a Kraken decode failure and `extract` fails. The package itself is sound (Sony's
+`img_verify` integrity check passes); the library locates NAPS spans by their encryption tweak,
+which relocation leaves pointing one block off.
+
 ### A build needs about half the free space it used to
 
 The inner `pfs_image.dat` is now written directly into the package at `0x10000` and hashed and
