@@ -39,8 +39,10 @@ Previously such a dump could only be built with `--playgo-fillers-force`, which 
 Each of these was measured byte-identical before fpkg's own copy was removed or narrowed.
 
 - **SELF normalisation.** 0.6.11 normalises `eboot.bin`, every `*.prx`, `fakelib/` and
-  `sce_module/` in an Application build, exactly as `SelfNormalize` did. fpkg now covers only the
-  executables outside that scope; `--force-self-normalize` covers everything again.
+  `sce_module/` in an Application build, exactly as `SelfNormalize` did, and offers no way to turn
+  it off. fpkg now covers only the executables outside that scope; `--force-self-normalize` covers
+  everything again. **`--no-self-normalize` is renamed `--no-extra-self-normalize`**, because it
+  can now only stop fpkg's part; the old name is refused with a pointer to the new one.
 - **FICM slot order.** `ProsperoPlayGo.BuildFileMap` sorts the hash table and FICM together and
   replaces fpkg's own slot ordering.
 - **Source exclusions.** `*.gp4`/`*.gp5`, the root `ampr_emu.index` and the two fake libraries are
@@ -56,7 +58,8 @@ single-file build's byte-parity tests pass unchanged.
 
 ### Flags
 
-Added: `--force-playgo-fix`, `--force-self-normalize`.
+Added: `--force-playgo-fix`, `--force-self-normalize`. Renamed: `--no-self-normalize` →
+`--no-extra-self-normalize`.
 
 ### `fpkg merge`: rebuild a full package from a base and an LIH patch
 

@@ -74,4 +74,39 @@ public class SelfNormalizeScopeTests
 
         Assert.Equal(Sha256(forced), Sha256(split));
     }
+
+    /// <summary>
+    /// The old spelling must fail, not be ignored: ParseFlags accepts any --name, so a silently
+    /// unknown flag would hand a script the default it asked to avoid.
+    /// </summary>
+    [Fact]
+    public void TheOldFlagNameIsRefusedWithThePointerToTheNewOne()
+    {
+        var (exit, log) = SyntheticPackage.RunFpkg(
+            ["build", "--source", "/nonexistent", "--out", "/nonexistent-out", "--no-self-normalize"]);
+        Assert.Equal(1, exit);
+        Assert.Contains("renamed --no-extra-self-normalize", log);
+    }
+
+    [Fact]
+    public void TheNewFlagSkipsOnlyFpkgsPart()
+    {
+        string source = Directory.CreateTempSubdirectory("selfextra").FullName;
+        Directory.CreateDirectory(Path.Combine(source, "sce_sys"));
+        File.WriteAllText(Path.Combine(source, "sce_sys", "param.json"), SyntheticPackage.ParamJson);
+        WriteSelf(source, "eboot.bin", 0x4000, early: 3, legacy: false);
+        WriteSelf(source, "bin/tool.self", 0x2400, early: 5, legacy: false);
+
+        var (exit, log) = SyntheticPackage.RunFpkg(
+            ["build", "--source", source, "--out", Directory.CreateTempSubdirectory("selfextra-o").FullName,
+             "--temp-dir", Directory.CreateTempSubdirectory("selfextra-t").FullName, "--no-extra-self-normalize"]);
+        Assert.True(exit == 0, log);
+        Assert.DoesNotContain("self:   normalised", log);
+
+        (exit, log) = SyntheticPackage.RunFpkg(
+            ["build", "--source", source, "--out", Directory.CreateTempSubdirectory("selfextra-o2").FullName,
+             "--temp-dir", Directory.CreateTempSubdirectory("selfextra-t2").FullName]);
+        Assert.True(exit == 0, log);
+        Assert.Contains("normalised 1 executable(s) the way the Windows SDK does: bin/tool.self", log);
+    }
 }
