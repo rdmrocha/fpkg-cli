@@ -114,4 +114,48 @@ public class ExtractSelectionTests
 
         Assert.Equal(["data.bin"], Tree(root));
     }
+
+    [Theory]
+    [InlineData("eboot.bin")]
+    [InlineData("sce_sys/param.json")]
+    [InlineData("deep/nested/anything.dat")]
+    public void EverythingAcceptsAnyPath(string path) =>
+        Assert.True(ExtractSelection.Everything.Accepts(path));
+
+    /// <summary>
+    /// --all is the union of a no-path extract (inner/) and --rebuild-source (source/), in one
+    /// tree, with the CNT copy on top where both have a path.
+    /// </summary>
+    [Fact]
+    public void AllIsTheInnerTreeWithTheRebuildSourceOverIt()
+    {
+        string root = FreshOut();
+        var (exit, log) = SyntheticPackage.RunFpkg(["extract", SyntheticPackage.Path, root, "--all"]);
+        Assert.True(exit == 0, log);
+
+        string split = FreshOut();
+        (exit, log) = SyntheticPackage.RunFpkg(["extract", SyntheticPackage.Path, split]);
+        Assert.True(exit == 0, log);
+        (exit, log) = SyntheticPackage.RunFpkg(["extract", SyntheticPackage.Path, split, "--rebuild-source"]);
+        Assert.True(exit == 0, log);
+
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string f in Tree(Path.Combine(split, "inner"))) expected[f] = Path.Combine(split, "inner", f);
+        foreach (string f in Tree(Path.Combine(split, "source"))) expected[f] = Path.Combine(split, "source", f);
+
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), Tree(root));
+        foreach (var (rel, source) in expected)
+            Assert.Equal(File.ReadAllBytes(source), File.ReadAllBytes(Path.Combine(root, rel)));
+    }
+
+    [Fact]
+    public void AllWithPathsIsRefusedBeforeAnythingIsWritten()
+    {
+        string root = FreshOut();
+        var (exit, log) = SyntheticPackage.RunFpkg(["extract", SyntheticPackage.Path, root, "data.bin", "--all"]);
+
+        Assert.NotEqual(0, exit);
+        Assert.Contains("--all", log);
+        Assert.False(Directory.Exists(root) && Tree(root).Length > 0);
+    }
 }

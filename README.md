@@ -13,7 +13,7 @@ Nothing in this zip is Drakmor's work, Sony's, or RAD's. You supply those yourse
 ## What you need
 
 - **A LibProsperoPkg release** (0.6.11 or compatible) — unzip it somewhere; that folder is your working directory.
-- **The .NET 10 runtime**: `brew install dotnet`.
+- **The .NET 10 runtime or newer**: `brew install dotnet`. A newer major (Homebrew moves to it on `brew upgrade`) works too; an already-built `fpkg-tools/bin/` from before 0.6.11 needs deleting so it rebuilds with that allowance.
 - macOS or Linux, arm64 or x64. One `fpkg-cli-<version>.zip` runs on all four: it is portable IL, not a per-platform build.
 - **Optional but worth it: a RAD Oodle library**, version 2.9.16. It makes builds roughly three times faster. Get it *before* you patch — see "Optional: the native Oodle encoder" below for the exact file names to look for.
 
@@ -154,6 +154,8 @@ Keep the opt-outs in mind only if you know why you want them: with any of them o
 ./fpkg extract GAME.pkg out/            # the inner filesystem
 ./fpkg extract GAME.pkg out/ --rebuild-source
                                         # just the sce_sys inputs a rebuild needs
+./fpkg extract GAME.pkg out/ --all      # the whole game folder: inner files and
+                                        # sce_sys, as one tree in out/
 ./fpkg extract GAME.pkg out/ eboot.bin sce_module fakelib sce_sys
                                         # only these files/folders, inner or CNT,
                                         # as one game tree in out/
@@ -162,7 +164,7 @@ Keep the opt-outs in mind only if you know why you want them: with any of them o
 ./fpkg template DLC.pkg template-dir/
 ```
 
-Paths after the output folder pick files and folders by their place in the game tree, so you don't need to know whether they sit in the inner filesystem or in the package's CNT entries. A folder takes everything under it. Inner files and `sce_sys` entries land together in `out/`, and where a path exists in both, the CNT copy wins, matching the library's own `ListExtractionFiles`. A path that matches nothing stops the command before anything is extracted. This needs LibProsperoPkg 0.6.11. It also works with `--rebuild-source`, which then keeps only the named `sce_sys` files.
+Paths after the output folder pick files and folders by their place in the game tree, so you don't need to know whether they sit in the inner filesystem or in the package's CNT entries. A folder takes everything under it. Inner files and `sce_sys` entries land together in `out/`, and where a path exists in both, the CNT copy wins, matching the library's own `ListExtractionFiles`. A path that matches nothing stops the command before anything is extracted. This needs LibProsperoPkg 0.6.11. It also works with `--rebuild-source`, which then keeps only the named `sce_sys` files. `--all` is the same merge with nothing filtered out: every inner file plus every rebuild-source `sce_sys` file, which is the closest thing to the folder the package was built from (container-generated entries are still left out; add `--cnt`/`--si` for those as raw records).
 
 `--rebuild-source` and `template` read package entries only and never touch the inner filesystem, so they finish in seconds even on a large package.
 

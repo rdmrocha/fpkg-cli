@@ -15,6 +15,20 @@ namespace Fpkg.Cli;
 internal sealed class ExtractSelection
 {
     private readonly string[] selectors;
+    private readonly bool everything;
+
+    /// <summary>
+    /// <c>--all</c>: every inner file and every rebuild-source CNT file, in the same single tree
+    /// and with the same CNT-wins rule as a named selection. Typed paths can't ask for this
+    /// (<c>.</c> is refused), because "no paths" keeps the old split <c>inner/</c> layout.
+    /// </summary>
+    internal static ExtractSelection Everything { get; } = new();
+
+    private ExtractSelection()
+    {
+        selectors = [];
+        everything = true;
+    }
 
     internal ExtractSelection(IEnumerable<string> paths)
     {
@@ -33,7 +47,7 @@ internal sealed class ExtractSelection
     /// filesystem anyway. A selector matches whole path segments only: <c>sce_module</c> does not
     /// take <c>sce_modules/</c>.
     /// </summary>
-    internal bool Accepts(string path) => selectors.Any(s => Matches(path, s));
+    internal bool Accepts(string path) => everything || selectors.Any(s => Matches(path, s));
 
     /// <summary>The selectors that none of <paramref name="available"/> satisfies.</summary>
     internal IReadOnlyList<string> Unmatched(IEnumerable<string> available)

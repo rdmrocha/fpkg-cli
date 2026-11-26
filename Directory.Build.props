@@ -1,0 +1,11 @@
+<Project>
+  <!-- Every project here targets net10.0. Let a framework-dependent build run on a newer major
+       runtime when .NET 10 itself is absent: Homebrew's `dotnet` formula tracks the latest
+       major, so a `brew upgrade` that moves it to 11 otherwise leaves fpkg, the patchers and the
+       test host refusing to start ("You must install or update .NET to run this application").
+       Major, not LatestMajor, so an installed 10 is still preferred. A self-contained
+       (standalone) build carries its own runtime and ignores this. -->
+  <PropertyGroup>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+</Project>

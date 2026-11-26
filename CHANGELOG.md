@@ -6,6 +6,18 @@ Tracks LibProsperoPkg 0.6.11. **Re-run `./fpkg patch` after updating**: two IL s
 patched copy is keyed to the hash of the library it came from, so until you re-patch, the new
 release runs unpatched and `fpkg` says so.
 
+### `extract --all`: the whole package as one game folder
+
+`./fpkg extract GAME.pkg out/ --all` writes every inner file and every rebuild-source `sce_sys`
+file into a single tree at `out/`, the CNT copy winning where a path is in both, the same as a
+named-path extract. A plain `extract` still writes `out/inner/`. Needs LibProsperoPkg 0.6.11.
+
+### Runs on a newer .NET when 10 is absent
+
+Every project now rolls forward to the next major runtime (`Directory.Build.props`), so a
+`brew upgrade` that replaces .NET 10 with 11 no longer stops fpkg with "You must install or update
+.NET to run this application". An installed .NET 10 is still preferred.
+
 ### PlayGo: the library keeps a dump's own map, and fpkg stops repairing over it
 
 0.6.11 can keep a source's PlayGo map. Given `playgo-chunk.dat`, `playgo-hash-table.dat` and

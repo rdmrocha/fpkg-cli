@@ -149,6 +149,10 @@ internal static class Program
                                         files land in ONE game tree at <dir> (CNT wins
                                         where a path is in both). Fails before writing
                                         anything if a path matches nothing.
+          fpkg extract <file.pkg> <dir> --all [--passcode <32>] [--raw] [--cnt] [--si]
+                                        the whole game folder: every inner file plus the
+                                        rebuild-source sce_sys files, in ONE tree at <dir>
+                                        (CNT wins where a path is in both)
           fpkg extract <file.pkg> <dir> --rebuild-source [--passcode <32>]
                                         CNT entries only, written back to the sce_sys/
                                         paths a rebuild reads them from, with the
@@ -732,11 +736,17 @@ internal static class Program
         var paths = args.Skip(3).TakeWhile(a => !a.StartsWith("--")).ToArray();
         var flags = ParseFlags(args.Skip(2 + paths.Length).ToArray());
         var passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
+        var all = flags.ContainsKey("all");
+        if (all && paths.Length > 0)
+            return Fail("--all already takes everything; drop the paths or drop --all");
+        if (all && flags.ContainsKey("rebuild-source"))
+            return Fail("--all and --rebuild-source are opposites: --all includes the inner PFS");
 #if LIB_HAS_SELECTIVE_EXTRACT
-        var selection = paths.Length > 0 ? new ExtractSelection(paths) : null;
+        var selection = all ? ExtractSelection.Everything
+                      : paths.Length > 0 ? new ExtractSelection(paths) : null;
 #else
-        if (paths.Length > 0)
-            return Fail("extracting selected paths needs LibProsperoPkg 0.6.11 or newer");
+        if (paths.Length > 0 || all)
+            return Fail("extracting selected paths or --all needs LibProsperoPkg 0.6.11 or newer");
 #endif
         Directory.CreateDirectory(outDir);
 
@@ -773,7 +783,8 @@ internal static class Program
         {
             // Checked against the library's own listing before anything is written, so a typo
             // fails fast instead of after a long inner-PFS pass. Metadata only: no payload is read.
-            var missing = selection.Unmatched(
+            // --all has no selectors to check, so it skips the listing pass entirely.
+            var missing = selection.Selectors.Count == 0 ? Array.Empty<string>() : selection.Unmatched(
                 ProsperoPackageArchive.ListExtractionFiles(pkg, passcode).Select(f => f.RelativePath));
             if (missing.Count > 0)
                 return Fail($"nothing in the package matches: {string.Join(", ", missing)}");
