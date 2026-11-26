@@ -64,6 +64,8 @@ internal static class Program
                 "inner-list" => InnerListCommand(args),
                 "merge"  => MergeCommand(args),
                 "playgo-fix" => PlayGo.PlayGoFixCommand.Run(args, Fail, ParseFlags),
+                "patch-plan" => MakePatch.PatchPlanCommand.Run(args, Fail),
+                "make-patch" => MakePatch.MakePatchCommand.Run(args, Fail),
                 var cmd  => Fail($"unknown command '{cmd}' (try: fpkg help)"),
             };
         }
@@ -140,6 +142,13 @@ internal static class Program
                                         unpack the inner PPR-PFS files (default),
                                         --raw keeps files compressed, --cnt/--si add
                                         the CNT entries / debug SI ZIP
+          fpkg extract <file.pkg> <dir> <path>... [--passcode <32>] [--raw]
+                                        only the named files and folders, e.g.
+                                        `eboot.bin sce_module fakelib sce_sys`, wherever
+                                        they live: inner PFS files and the CNT sce_sys
+                                        files land in ONE game tree at <dir> (CNT wins
+                                        where a path is in both). Fails before writing
+                                        anything if a path matches nothing.
           fpkg extract <file.pkg> <dir> --rebuild-source [--passcode <32>]
                                         CNT entries only, written back to the sce_sys/
                                         paths a rebuild reads them from, with the
@@ -712,15 +721,23 @@ internal static class Program
     }
 #endif
 
-    private static int Extract(string[] args)
+    internal static int Extract(string[] args)
     {
         if (args.Length < 3) return Fail("extract needs a package path and an output directory");
         var pkg = Path.GetFullPath(args[1]);
         var outDir = Path.GetFullPath(args[2]);
         if (!File.Exists(pkg)) return Fail($"no such file: {pkg}");
         if (LihMerge.IsLih(pkg)) return Fail(LihHint(pkg));
-        var flags = ParseFlags(args.Skip(2).ToArray());
+        // Paths to extract sit between the output directory and the first flag.
+        var paths = args.Skip(3).TakeWhile(a => !a.StartsWith("--")).ToArray();
+        var flags = ParseFlags(args.Skip(2 + paths.Length).ToArray());
         var passcode = flags.GetValueOrDefault("passcode") ?? new string('0', 32);
+#if LIB_HAS_SELECTIVE_EXTRACT
+        var selection = paths.Length > 0 ? new ExtractSelection(paths) : null;
+#else
+        if (paths.Length > 0)
+            return Fail("extracting selected paths needs LibProsperoPkg 0.6.11 or newer");
+#endif
         Directory.CreateDirectory(outDir);
 
         Console.WriteLine($"Package: {pkg}");
@@ -732,9 +749,17 @@ internal static class Program
         // opened, so this is fast even on a large package.
         if (flags.ContainsKey("rebuild-source"))
         {
+#if LIB_HAS_SELECTIVE_EXTRACT
+            var rebuild = ProsperoPackageArchive.ExtractRebuildSourceFiles(
+                pkg, Path.Combine(outDir, "source"), passcode, default, null,
+                name => Console.WriteLine($"  {name}"), selection is null ? null : selection.Accepts);
+            if (selection?.Unmatched(rebuild) is { Count: > 0 } missing)
+                return Fail($"no rebuild-source file matches: {string.Join(", ", missing)}");
+#else
             var rebuild = ProsperoPackageArchive.ExtractRebuildSourceFiles(
                 pkg, Path.Combine(outDir, "source"), passcode, default, null,
                 name => Console.WriteLine($"  {name}"));
+#endif
             Console.WriteLine($"\n{rebuild.Count} rebuild-source file(s) — payload not included.");
             return 0;
         }
@@ -743,11 +768,45 @@ internal static class Program
             return Fail("--rebuild-source needs LibProsperoPkg 0.6.7 or newer");
 #endif
 
-        var inner = LibProsperoPkg.PKG.ProsperoPackageArchive.ExtractInnerFiles(
-            pkg, Path.Combine(outDir, "inner"), passcode, !flags.ContainsKey("raw"));
-        Console.WriteLine($"\ninner files: {inner.Count}");
-        foreach (var f in inner.Take(40)) Console.WriteLine($"  {f}");
-        if (inner.Count > 40) Console.WriteLine($"  ... {inner.Count - 40} more");
+#if LIB_HAS_SELECTIVE_EXTRACT
+        if (selection is not null)
+        {
+            // Checked against the library's own listing before anything is written, so a typo
+            // fails fast instead of after a long inner-PFS pass. Metadata only: no payload is read.
+            var missing = selection.Unmatched(
+                ProsperoPackageArchive.ListExtractionFiles(pkg, passcode).Select(f => f.RelativePath));
+            if (missing.Count > 0)
+                return Fail($"nothing in the package matches: {string.Join(", ", missing)}");
+
+            // One tree, in the order ListExtractionFiles documents: inner files first, then the
+            // CNT files over them, so where a path is in both the CNT copy is the one kept.
+            IReadOnlyList<string> innerPicked = ProsperoPackageArchive.Inspect(pkg).OuterPfsSize > 0
+                ? ProsperoPackageArchive.ExtractInnerFiles(pkg, outDir, passcode, !flags.ContainsKey("raw"),
+                                                           default, null, null, selection.Accepts)
+                : [];
+            var cntPicked = ProsperoPackageArchive.ExtractRebuildSourceFiles(
+                pkg, outDir, passcode, default, null, null, selection.Accepts);
+
+            var both = innerPicked.Intersect(cntPicked, StringComparer.Ordinal).Count();
+            var picked = innerPicked.Union(cntPicked, StringComparer.Ordinal)
+                                    .Order(StringComparer.Ordinal).ToArray();
+            Console.WriteLine($"\nextracted {picked.Length} file(s) " +
+                              $"({innerPicked.Count} inner, {cntPicked.Count} CNT) into {outDir}");
+            foreach (var f in picked.Take(40)) Console.WriteLine($"  {f}");
+            if (picked.Length > 40) Console.WriteLine($"  ... {picked.Length - 40} more");
+            if (both > 0)
+                Console.WriteLine($"{both} path(s) were in both the inner PFS and the CNT entries; " +
+                                  "the CNT copy was kept.");
+        }
+        else
+#endif
+        {
+            var inner = LibProsperoPkg.PKG.ProsperoPackageArchive.ExtractInnerFiles(
+                pkg, Path.Combine(outDir, "inner"), passcode, !flags.ContainsKey("raw"));
+            Console.WriteLine($"\ninner files: {inner.Count}");
+            foreach (var f in inner.Take(40)) Console.WriteLine($"  {f}");
+            if (inner.Count > 40) Console.WriteLine($"  ... {inner.Count - 40} more");
+        }
 
         if (flags.ContainsKey("cnt"))
         {
@@ -764,7 +823,7 @@ internal static class Program
         return 0;
     }
 
-    private static int Build(string[] args)
+    internal static int Build(string[] args)
     {
         var flags = ParseFlags(args);
         // Refused rather than ignored: ParseFlags accepts any --name, so a script still passing the

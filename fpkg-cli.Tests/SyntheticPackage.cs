@@ -19,6 +19,22 @@ internal static class SyntheticPackage
 {
     internal const string Passcode = "00000000000000000000000000000000";
 
+    /// <summary>
+    /// The temp directory with its symlinks resolved. On macOS it lives under /var, a link to
+    /// /private/var, and the library's extractor refuses any output path that passes through a link.
+    /// </summary>
+    internal static string ResolvedTemp { get; } = Resolve(System.IO.Path.GetTempPath());
+
+    private static string Resolve(string path)
+    {
+        string full = System.IO.Path.GetFullPath(path).TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        if (full.Length == 0) return System.IO.Path.DirectorySeparatorChar.ToString();
+        string? parent = System.IO.Path.GetDirectoryName(full);
+        string resolved = parent is null ? full : System.IO.Path.Combine(Resolve(parent), System.IO.Path.GetFileName(full));
+        var info = new DirectoryInfo(resolved);
+        return info.LinkTarget is null ? resolved : info.ResolveLinkTarget(true)!.FullName;
+    }
+
     /// <summary>The minimal param.json a source tree needs, shared with fixtures built elsewhere.</summary>
     internal static string ParamJson { get; } =
         JsonSerializer.Serialize(new

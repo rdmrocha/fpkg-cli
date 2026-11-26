@@ -1220,6 +1220,123 @@ internal static class Rewrites
         OpCodes.Call.ToInstruction(shim.FillerDisableDedup),
     ];
 
+    /// <summary>
+    /// Site 25. make-patch passthrough, at the head of BuildCore's physical placement run (the
+    /// same run site 12 matches, and after site 12's guard):
+    /// <code>
+    /// cursor = PatchPassthrough.AdjustCursor(stream, cursor);
+    /// if (PatchPassthrough.Apply(file)) goto afterWrite;   // afterWrite: file.OnDiskData = null;
+    /// </code>
+    /// The branch skips the WholeBlockRaw round-up, the OnDiskOffset/seek, the write and the
+    /// cursor update, and lands on the arm's common tail. Inert unless the CLI enables
+    /// PatchPassthrough: AdjustCursor returns the cursor unchanged and Apply returns false.
+    /// </summary>
+    internal static void PatchPassthrough(TypeDef assembler, Sites.Shim shim)
+    {
+        var fileNode = assembler.NestedTypes.SingleOrDefault(t => t.Name == "FileNode")
+            ?? throw new InvalidOperationException("ProsperoPs5InnerImageAssembler.FileNode not found");
+        var build = Sites.Method(assembler, "BuildCore", "LibProsperoPkg.PFS.ProsperoPs5InnerImageResult", 4);
+        var body = build.Body.Instructions;
+        var locals = build.Body.Variables;
+
+        int at = -1;
+        Local? file = null, cursor = null, stream = null;
+        for (int i = 0; i + 13 < body.Count; i++)
+        {
+            if (!LoadsField(body[i + 1], fileNode, "WholeBlockRaw")) continue;
+            if (body[i + 2].OpCode != OpCodes.Brfalse && body[i + 2].OpCode != OpCodes.Brfalse_S) continue;
+            var f = body[i].GetLocal(locals);
+            var c = body[i + 3].GetLocal(locals);
+            if (f is null || c is null || f.Type.FullName != fileNode.FullName || c.Type.FullName != "System.Int64") continue;
+            if (body[i + 6].Operand is not IMethod r || r.Name != "RoundUp") continue;
+            if (!ReferenceEquals(body[i + 7].GetLocal(locals), c)) continue;
+            if (!ReferenceEquals(body[i + 8].GetLocal(locals), f)) continue;
+            if (body[i + 10].OpCode != OpCodes.Stfld || body[i + 10].Operand is not IField off ||
+                off.Name != "OnDiskOffset") continue;
+            var st = body[i + 11].GetLocal(locals);
+            if (st is null || st.Type.FullName != "System.IO.Stream") continue;
+            if (body[i + 13].Operand is not IMethod seek || seek.Name != "set_Position") continue;
+            Sites.Expect(at < 0, "BuildCore: more than one physical-placement run (site 25)");
+            at = i; file = f; cursor = c; stream = st;
+        }
+        Sites.Expect(at >= 0, "BuildCore: the physical-placement run was not found (site 25)");
+
+        // The arm's common tail: the first `ldloc file; ldnull; stfld OnDiskData` after the run.
+        int tail = -1;
+        for (int i = at + 14; i + 2 < body.Count; i++)
+        {
+            if (!ReferenceEquals(body[i].GetLocal(locals), file)) continue;
+            if (body[i + 1].OpCode != OpCodes.Ldnull) continue;
+            if (body[i + 2].OpCode == OpCodes.Stfld && body[i + 2].Operand is IField od && od.Name == "OnDiskData")
+            { tail = i; break; }
+        }
+        Sites.Expect(tail > at, "BuildCore: `file.OnDiskData = null` after the placement run was not found (site 25)");
+        ExpectNotTargeted(build, body, at, 1, "the head of BuildCore's placement run (site 25)");
+
+        Instruction[] guard =
+        [
+            OpCodes.Ldloc.ToInstruction(stream!),
+            OpCodes.Ldloc.ToInstruction(cursor!),
+            OpCodes.Call.ToInstruction(shim.PassAdjustCursor),
+            OpCodes.Stloc.ToInstruction(cursor!),
+            OpCodes.Ldloc.ToInstruction(file!),
+            OpCodes.Call.ToInstruction(shim.PassApply),
+            OpCodes.Brtrue.ToInstruction(body[tail]),
+        ];
+        for (int i = 0; i < guard.Length; i++) body.Insert(at + i, guard[i]);
+        build.Body.UpdateInstructionOffsets();
+        Console.WriteLine($"  site 25: make-patch passthrough in {build.Name} (cursor V_{cursor!.Index})");
+    }
+
+    /// <summary>
+    /// Site 26. make-patch CNT entries: in ProsperoPkgBuilder.BuildContainer, immediately before
+    /// <c>Entry[] first = pkg.Entries.Take(6).ToArray();</c> (the list is complete there and not
+    /// yet ordered or laid out), insert <c>PatchExtras.AddEntries(pkg.Entries);</c>.
+    /// Inert unless the CLI configures PatchExtras.
+    /// </summary>
+    internal static void PatchCntEntries(MethodDef buildContainer, Sites.Shim shim)
+    {
+        var body = buildContainer.Body.Instructions;
+        var locals = buildContainer.Body.Variables;
+        int at = -1;
+        for (int i = 0; i + 3 < body.Count; i++)
+        {
+            if (body[i].GetLocal(locals) is not { } pkg || pkg.Type.FullName != "LibProsperoPkg.PKG.Pkg") continue;
+            if (body[i + 1].OpCode != OpCodes.Ldfld || body[i + 1].Operand is not IField f || f.Name != "Entries") continue;
+            if (!body[i + 2].IsLdcI4() || body[i + 2].GetLdcI4Value() != 6) continue;
+            if (body[i + 3].Operand is not IMethod take || take.Name != "Take") continue;
+            Sites.Expect(at < 0, "BuildContainer: more than one `pkg.Entries.Take(6)` (site 26)");
+            at = i;
+        }
+        Sites.Expect(at >= 0, "BuildContainer: `pkg.Entries.Take(6)` not found (site 26)");
+        // The Take is the join point after the PlayGo branch, so branches land on it. Every path
+        // to it must also run the call, so those branches are retargeted to the call's first
+        // instruction. Exception-handler boundaries on it would change meaning: refuse those.
+        var target = body[at];
+        Sites.Expect(!buildContainer.Body.ExceptionHandlers.Any(h =>
+                h.TryStart == target || h.TryEnd == target || h.HandlerStart == target || h.HandlerEnd == target),
+            "the `pkg.Entries.Take(6)` in BuildContainer is an exception-handler boundary (site 26)");
+        var load = body[at];
+        var field = (IField)body[at + 1].Operand;
+        Instruction[] call =
+        [
+            new Instruction(load.OpCode, load.Operand),
+            OpCodes.Ldfld.ToInstruction(field),
+            OpCodes.Call.ToInstruction(shim.ExtrasAddEntries),
+        ];
+        int retargeted = 0;
+        foreach (var ins in body)
+        {
+            if (ins.Operand == target) { ins.Operand = call[0]; retargeted++; }
+            else if (ins.Operand is Instruction[] cases)
+                for (int k = 0; k < cases.Length; k++)
+                    if (cases[k] == target) { cases[k] = call[0]; retargeted++; }
+        }
+        for (int i = 0; i < call.Length; i++) body.Insert(at + i, call[i]);
+        buildContainer.Body.UpdateInstructionOffsets();
+        Console.WriteLine($"  site 26: make-patch CNT entries in {buildContainer.Name} ({retargeted} branch(es) retargeted)");
+    }
+
     private static bool LoadsField(Instruction ins, TypeDef declaring, string name) =>
         ins.OpCode == OpCodes.Ldfld && ins.Operand is IField f && f.Name == name &&
         f.DeclaringType?.FullName == declaring.FullName;

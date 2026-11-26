@@ -97,7 +97,19 @@ internal static class Sites
             InPlaceTryDelete = importer.Import(Method(inPlace, "TryDeleteWindow", "System.Boolean", 1));
             InPlaceOutputMode = importer.Import(Method(inPlace, "OutputFileMode", "System.Int32", 0));
             InPlaceOutputShare = importer.Import(Method(inPlace, "OutputFileShare", "System.Int32", 0));
+
+            // Site 25. make-patch passthrough: inert unless PatchPassthrough.Enabled.
+            var pass = Type(shim, "FpkgVirtualSource.PatchPassthrough");
+            PassAdjustCursor = importer.Import(Method(pass, "AdjustCursor", "System.Int64", 2));
+            PassApply = importer.Import(Method(pass, "Apply", "System.Boolean", 1));
+            ExtrasAddEntries = importer.Import(Method(Type(shim, "FpkgVirtualSource.PatchExtras"),
+                "AddEntries", "System.Void", 1));
         }
+
+        internal IMethod ExtrasAddEntries { get; }
+
+        internal IMethod PassAdjustCursor { get; }
+        internal IMethod PassApply { get; }
 
         internal IMethod IsVirtual { get; }
         internal IMethod Open { get; }

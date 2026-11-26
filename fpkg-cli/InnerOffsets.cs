@@ -52,6 +52,8 @@ internal sealed class InnerOffsets : IDisposable
 
     internal long OuterPfsOffsetInPkg => outerPfsOffsetInPkg;
     internal long ImageOffsetInPkg => outerPfsOffsetInPkg + imageOffsetInOuter;
+    /// <summary>True when pfs_image.dat occupies one contiguous run of the package.</summary>
+    internal bool ImageContiguous => imageBlocks is null;
     internal bool ImageIsContiguous => imageBlocks is null;
     internal int SpanCount => spans.Length;
     internal int StoredSpanCount =>

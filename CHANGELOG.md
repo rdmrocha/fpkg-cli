@@ -63,6 +63,14 @@ single-file build's byte-parity tests pass unchanged.
 Added: `--force-playgo-fix`, `--extra-self-normalize`, `--force-self-normalize`.
 Removed: `--no-self-normalize` (refused, with the reason).
 
+### `fpkg extract` takes the paths you want
+
+`fpkg extract GAME.pkg out/ eboot.bin sce_module fakelib sce_sys` extracts only those files and
+folders, whether they live in the inner PFS or in the CNT entries, into one game tree in `out/`.
+Where a path is in both, the CNT copy wins. It is built on 0.6.11's selective-extraction API
+(`ListExtractionFiles` and the path-filter overloads), and every path is checked against that
+listing first, so a typo fails before anything is written. `--rebuild-source` takes the same paths.
+
 ### `fpkg merge`: rebuild a full package from a base and an LIH patch
 
 Backports and other patch-style releases ship as an LIH compact patch (a `.pkg` starting with

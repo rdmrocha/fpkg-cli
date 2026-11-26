@@ -141,10 +141,13 @@ public static class VirtualSourcePatcherProgram
                 Sites.Method(builder, "BuildPublisherImage", "System.Void", 7),
                 Sites.Method(builder, "TryDeleteTemp", "System.Void", 1),
                 shim);
+            Rewrites.PatchPassthrough(assembler, shim);
+            Rewrites.PatchCntEntries(
+                Sites.Method(builder, "BuildContainer", "LibProsperoPkg.PKG.Pkg", 15), shim);
 
             module.Write(output);
             Console.WriteLine($"wrote {output} (sites 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, " +
-                              "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24)");
+                              "14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26)");
             return 0;
         }
         catch (Exception ex)

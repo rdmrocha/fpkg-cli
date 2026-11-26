@@ -60,3 +60,4 @@ OodleUE*.zip
 
 fpkg-cli.Tests/bin/
 fpkg-cli.Tests/obj/
+out/

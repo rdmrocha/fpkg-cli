@@ -184,7 +184,7 @@ internal static class InnerList
     /// (DecodeInnerPfs/ExtractInnerFiles) either returns a byte[] of the whole image or writes
     /// files out, so neither can be used here.
     /// </summary>
-    private static IDisposable OpenSession(string packagePath, string passcode,
+    internal static IDisposable OpenSession(string packagePath, string passcode,
                                            CancellationToken cancellationToken)
     {
         var method = typeof(ProsperoPackageArchive).GetMethod(
@@ -202,13 +202,13 @@ internal static class InnerList
         }
     }
 
-    private static LibProsperoPkg.PFS.Compression.ProsperoNapsPlan PlanOf(object session) =>
+    internal static LibProsperoPkg.PFS.Compression.ProsperoNapsPlan PlanOf(object session) =>
         (LibProsperoPkg.PFS.Compression.ProsperoNapsPlan)(
             session.GetType().GetProperty("Plan")?.GetValue(session)
             ?? throw new InvalidOperationException(
                 "the inner-PFS session no longer exposes Plan; re-derive inner-list's offsets."));
 
-    private static IEnumerable<PfsReader.File> FilesOf(object session)
+    internal static IEnumerable<PfsReader.File> FilesOf(object session)
     {
         var files = session.GetType().GetProperty("Files")?.GetValue(session)
             ?? throw new InvalidOperationException(

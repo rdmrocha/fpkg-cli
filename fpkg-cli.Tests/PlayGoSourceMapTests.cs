@@ -18,21 +18,7 @@ namespace Fpkg.Tests;
 /// </summary>
 public class PlayGoSourceMapTests
 {
-    /// <summary>
-    /// The temp directory with its symlinks resolved. On macOS it lives under /var, a link to
-    /// /private/var, and the library's extractor refuses any output path that passes through a link.
-    /// </summary>
-    private static string Temp { get; } = Resolve(Path.GetTempPath());
-
-    private static string Resolve(string path)
-    {
-        string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
-        if (full.Length == 0) return Path.DirectorySeparatorChar.ToString();
-        string? parent = Path.GetDirectoryName(full);
-        string resolved = parent is null ? full : Path.Combine(Resolve(parent), Path.GetFileName(full));
-        var info = new DirectoryInfo(resolved);
-        return info.LinkTarget is null ? resolved : info.ResolveLinkTarget(true)!.FullName;
-    }
+    private static string Temp => SyntheticPackage.ResolvedTemp;
 
     private static readonly Lazy<string> Extracted = new(Extract, LazyThreadSafetyMode.ExecutionAndPublication);
 

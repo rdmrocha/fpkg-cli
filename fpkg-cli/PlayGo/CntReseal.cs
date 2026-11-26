@@ -89,7 +89,8 @@ internal static class CntReseal
     }
 
     internal static byte[] Seal(byte[] cnt, IReadOnlyList<CntEntry> given,
-                               string contentId, string passcode, Progress? progress = null)
+                               string contentId, string passcode, Progress? progress = null,
+                               Func<byte[], byte[]>? adjustGeneralDigests = null)
     {
         // DEEP COPY, and this is a behavioural fix over the repair-playgo original, not a
         // tidy-up. That version mutated the CntEntry instances it was handed — DataOffset,
@@ -206,6 +207,10 @@ internal static class CntReseal
         // Sealed from the header BEFORE the body is written — the header-digest preimage is the
         // layout scalars just written above plus the (unchanged) mount descriptor.
         generalDigests.Payload = RebuildGeneralDigests(outCnt, generalDigests.Payload, physical, contentId);
+        // make-patch: a patch carries reference (origin) digests in slots a full build leaves
+        // empty. Applied before the entries are written and digested, so the chain covers them.
+        if (adjustGeneralDigests is not null)
+            generalDigests.Payload = adjustGeneralDigests(generalDigests.Payload);
 
         // ---- 4. Body ----------------------------------------------------------------------
         foreach (var e in physical)

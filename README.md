@@ -154,10 +154,15 @@ Keep the opt-outs in mind only if you know why you want them: with any of them o
 ./fpkg extract GAME.pkg out/            # the inner filesystem
 ./fpkg extract GAME.pkg out/ --rebuild-source
                                         # just the sce_sys inputs a rebuild needs
+./fpkg extract GAME.pkg out/ eboot.bin sce_module fakelib sce_sys
+                                        # only these files/folders, inner or CNT,
+                                        # as one game tree in out/
 
 # turn an add-on package back into something you can rebuild
 ./fpkg template DLC.pkg template-dir/
 ```
+
+Paths after the output folder pick files and folders by their place in the game tree, so you don't need to know whether they sit in the inner filesystem or in the package's CNT entries. A folder takes everything under it. Inner files and `sce_sys` entries land together in `out/`, and where a path exists in both, the CNT copy wins, matching the library's own `ListExtractionFiles`. A path that matches nothing stops the command before anything is extracted. This needs LibProsperoPkg 0.6.11. It also works with `--rebuild-source`, which then keeps only the named `sce_sys` files.
 
 `--rebuild-source` and `template` read package entries only and never touch the inner filesystem, so they finish in seconds even on a large package.
 
