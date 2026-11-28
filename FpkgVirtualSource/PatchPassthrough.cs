@@ -83,6 +83,12 @@ public static class PatchPassthrough
             if (cursor != 0)
                 throw new InvalidOperationException(
                     $"make-patch: BuildCore wrote {cursor} bytes before the base data was placed");
+            if (PatchVirtual.Enabled)
+            {
+                // Nothing to copy: the prefix stays a hole and PatchVirtual serves it from the base.
+                prefilled = true;
+                return Math.Max(cursor, dataEnd);
+            }
             using var src = new FileStream(basePackage!, FileMode.Open, FileAccess.Read, FileShare.Read,
                                            1 << 20, FileOptions.SequentialScan);
             stream.Position = 0;

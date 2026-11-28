@@ -1337,6 +1337,32 @@ internal static class Rewrites
         Console.WriteLine($"  site 26: make-patch CNT entries in {buildContainer.Name} ({retargeted} branch(es) retargeted)");
     }
 
+    /// <summary>
+    /// Site 27. make-patch without extra disk: every <c>new FileStream(...)</c> in
+    /// ProsperoOuterPfsBuilder.BuildForPackageToFile that is stored straight into a field (the
+    /// output handle site 24 widens to Stream) is passed through
+    /// <c>PatchVirtual.WrapOutput(Stream)</c>, which drops writes to the reused prefix. Returns its
+    /// argument unless make-patch enabled PatchVirtual.
+    /// </summary>
+    internal static void PatchVirtualOutput(MethodDef build, Sites.Shim shim)
+    {
+        var body = build.Body.Instructions;
+        var sites = new List<int>();
+        // `image = BuildFileIO.Open(path, mode, ReadWrite, share, 1 MiB, RandomAccess);` — the
+        // handle lands in the display-class field `image` (widened to Stream by site 24).
+        for (int i = 0; i + 1 < body.Count; i++)
+            if ((body[i].OpCode == OpCodes.Call || body[i].OpCode == OpCodes.Newobj) &&
+                body[i].Operand is IMethod open &&
+                (open.Name == "Open" || open.Name == ".ctor") &&
+                body[i + 1].OpCode == OpCodes.Stfld && body[i + 1].Operand is IField f && f.Name == "image")
+                sites.Add(i);
+        Sites.Expect(sites.Count >= 1, "BuildForPackageToFile: the output handle `image = ...Open(...)` was not found (site 27)");
+        for (int k = sites.Count - 1; k >= 0; k--)
+            body.Insert(sites[k] + 1, OpCodes.Call.ToInstruction(shim.VirtualWrapOutput));
+        build.Body.UpdateInstructionOffsets();
+        Console.WriteLine($"  site 27: make-patch virtual prefix on {sites.Count} output handle(s) in {build.Name}");
+    }
+
     private static bool LoadsField(Instruction ins, TypeDef declaring, string name) =>
         ins.OpCode == OpCodes.Ldfld && ins.Operand is IField f && f.Name == name &&
         f.DeclaringType?.FullName == declaring.FullName;

@@ -791,20 +791,22 @@ internal static class Program
 
             // One tree, in the order ListExtractionFiles documents: inner files first, then the
             // CNT files over them, so where a path is in both the CNT copy is the one kept.
+            var innerProgress = new ExtractProgress("inner PFS");
             IReadOnlyList<string> innerPicked = ProsperoPackageArchive.Inspect(pkg).OuterPfsSize > 0
                 ? ProsperoPackageArchive.ExtractInnerFiles(pkg, outDir, passcode, !flags.ContainsKey("raw"),
-                                                           default, null, null, selection.Accepts)
+                                                           default, innerProgress.Percent, innerProgress.File,
+                                                           selection.Accepts)
                 : [];
+            var cntProgress = new ExtractProgress("sce_sys");
             var cntPicked = ProsperoPackageArchive.ExtractRebuildSourceFiles(
-                pkg, outDir, passcode, default, null, null, selection.Accepts);
+                pkg, outDir, passcode, default, cntProgress.Percent, cntProgress.File, selection.Accepts);
 
             var both = innerPicked.Intersect(cntPicked, StringComparer.Ordinal).Count();
             var picked = innerPicked.Union(cntPicked, StringComparer.Ordinal)
                                     .Order(StringComparer.Ordinal).ToArray();
+            // Every file was already named as it was written, so only the totals are left.
             Console.WriteLine($"\nextracted {picked.Length} file(s) " +
                               $"({innerPicked.Count} inner, {cntPicked.Count} CNT) into {outDir}");
-            foreach (var f in picked.Take(40)) Console.WriteLine($"  {f}");
-            if (picked.Length > 40) Console.WriteLine($"  ... {picked.Length - 40} more");
             if (both > 0)
                 Console.WriteLine($"{both} path(s) were in both the inner PFS and the CNT entries; " +
                                   "the CNT copy was kept.");
@@ -812,11 +814,19 @@ internal static class Program
         else
 #endif
         {
+#if LIB_HAS_ARCHIVE_067
+            var progress = new ExtractProgress("inner PFS");
+            var inner = LibProsperoPkg.PKG.ProsperoPackageArchive.ExtractInnerFiles(
+                pkg, Path.Combine(outDir, "inner"), passcode, !flags.ContainsKey("raw"),
+                default, progress.Percent, progress.File);
+            Console.WriteLine($"\ninner files: {inner.Count}");
+#else
             var inner = LibProsperoPkg.PKG.ProsperoPackageArchive.ExtractInnerFiles(
                 pkg, Path.Combine(outDir, "inner"), passcode, !flags.ContainsKey("raw"));
             Console.WriteLine($"\ninner files: {inner.Count}");
             foreach (var f in inner.Take(40)) Console.WriteLine($"  {f}");
             if (inner.Count > 40) Console.WriteLine($"  ... {inner.Count - 40} more");
+#endif
         }
 
         if (flags.ContainsKey("cnt"))

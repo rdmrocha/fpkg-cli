@@ -113,8 +113,9 @@ public static class InPlaceImage
         Stream stream = OpenWindow(file, offset, mode, access, bufferSize, options);
         // The relocation pass needs to see every read the library's layout stream performs, and
         // a recorder that is neither recording nor serving is a plain pass-through.
+        // make-patch: the reused prefix is a hole in the package; reads of it come from the base.
         return access == FileAccess.Read
-            ? new LayoutRelocator.RecordingSource((WindowStream)stream).Install()
+            ? PatchVirtual.WrapImage(new LayoutRelocator.RecordingSource((WindowStream)stream).Install())
             : stream;
     }
 

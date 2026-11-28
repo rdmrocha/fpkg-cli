@@ -158,4 +158,19 @@ public class ExtractSelectionTests
         Assert.Contains("--all", log);
         Assert.False(Directory.Exists(root) && Tree(root).Length > 0);
     }
+
+    /// <summary>Each file is named on stdout as it is written, with the overall percent.</summary>
+    [Fact]
+    public void EveryExtractedFileIsReportedAsItIsWritten()
+    {
+        string root = FreshOut();
+        var (exit, log) = SyntheticPackage.RunFpkg(["extract", SyntheticPackage.Path, root, "--all"]);
+        Assert.True(exit == 0, log);
+
+        var lines = log.Split('\n').Select(l => l.TrimEnd('\r')).ToArray();
+        foreach (string file in Tree(root))
+            Assert.Contains(lines, l => System.Text.RegularExpressions.Regex.IsMatch(
+                l, @"^  \[\s*\d{1,3}%\] " + System.Text.RegularExpressions.Regex.Escape(file) + "$"));
+        Assert.Contains("  [100%] inner PFS", lines);
+    }
 }

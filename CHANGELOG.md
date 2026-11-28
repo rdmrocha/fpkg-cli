@@ -12,6 +12,10 @@ release runs unpatched and `fpkg` says so.
 file into a single tree at `out/`, the CNT copy winning where a path is in both, the same as a
 named-path extract. A plain `extract` still writes `out/inner/`. Needs LibProsperoPkg 0.6.11.
 
+`extract` now prints a line per file as it is written, with the overall percent (`  [ 37%] path`),
+plus a bare percent line whenever the percent moves between files, so one huge file still shows
+progress. The end-of-run sample of 40 file names is gone, since every file is already listed.
+
 ### Runs on a newer .NET when 10 is absent
 
 Every project now rolls forward to the next major runtime (`Directory.Build.props`), so a

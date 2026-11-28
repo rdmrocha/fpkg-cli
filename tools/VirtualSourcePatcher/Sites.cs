@@ -104,9 +104,12 @@ internal static class Sites
             PassApply = importer.Import(Method(pass, "Apply", "System.Boolean", 1));
             ExtrasAddEntries = importer.Import(Method(Type(shim, "FpkgVirtualSource.PatchExtras"),
                 "AddEntries", "System.Void", 1));
+            VirtualWrapOutput = importer.Import(Method(Type(shim, "FpkgVirtualSource.PatchVirtual"),
+                "WrapOutput", "System.IO.Stream", 1));
         }
 
         internal IMethod ExtrasAddEntries { get; }
+        internal IMethod VirtualWrapOutput { get; }
 
         internal IMethod PassAdjustCursor { get; }
         internal IMethod PassApply { get; }

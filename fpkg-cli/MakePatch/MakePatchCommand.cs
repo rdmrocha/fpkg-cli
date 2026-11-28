@@ -19,7 +19,8 @@ internal static class MakePatchCommand
 {
     internal static int Run(string[] args, Func<string, Exception?, int> fail)
     {
-        string? basePkg = null, changes = null, outDir = null, temp = null, version = null, lih = null;
+        string? basePkg = null, changes = null, outDir = null, temp = null, version = null, lih = null, created = null;
+        bool fullCopy = false, keep = false;
         var deletes = new List<string>();
         var extra = new List<string>();
         for (int i = 1; i < args.Length; i++)
@@ -34,6 +35,9 @@ internal static class MakePatchCommand
                 case "--temp-dir": temp = Next(); break;
                 case "--content-version": version = Next(); break;
                 case "--lih": lih = Next(); break;
+                case "--creation-date": created = Next(); break;      // "yyyy-MM-dd HH:mm:ss" (default: now, UTC)
+                case "--full-copy": fullCopy = true; break;            // write the reused prefix too
+                case "--keep": keep = true; break;                     // keep staging + target
                 default: extra.Add(args[i]); break;   // passed through to `fpkg build`
             }
         }
@@ -50,6 +54,7 @@ internal static class MakePatchCommand
         var changed = changes is null
             ? new Dictionary<string, string>(StringComparer.Ordinal)
             : Directory.EnumerateFiles(changes, "*", SearchOption.AllDirectories)
+                       .Where(p => Path.GetFileName(p) is not ".DS_Store" && !Path.GetFileName(p).StartsWith("._", StringComparison.Ordinal))
                        .ToDictionary(p => Path.GetRelativePath(changes, p).Replace('\\', '/'), p => p, StringComparer.Ordinal);
         foreach (var d in deletes)
             if (!image.Files.Any(f => f.Path == d || f.Path.StartsWith(d + "/", StringComparison.Ordinal)))
@@ -88,6 +93,9 @@ internal static class MakePatchCommand
                     f.Size, f.ContiguousRaw ? f.Blocks[0].StoredOffset : -1, d.Chunks, d.Integrity);
             }
         }
+        // The base's own param.json, before any changed copy replaces it: it is the patch's
+        // origin/target param (CNT 8448/8449) and the source of the origin version.
+        byte[] baseParam = File.ReadAllBytes(Path.Combine(staging, "sce_sys", "param.json"));
         foreach (var (rel, path) in changed)
         {
             string dst = Path.Combine(staging, rel);
@@ -100,10 +108,11 @@ internal static class MakePatchCommand
         // A patch's own version: param.json and the inner sce_sys/pfs-version.dat (which is the
         // version as text). param.json gains origin/target versions and loses attributePub,
         // exactly as Sony's patch does; the base's param.json rides along as 8448/8449.
+        // The target param.json is the changed one when the backport ships one (it usually lowers
+        // the SDK / required system version), else the base's.
         string paramPath = Path.Combine(staging, "sce_sys", "param.json");
-        byte[] baseParam = File.ReadAllBytes(paramPath);
-        var param = JsonNode.Parse(baseParam)!.AsObject();
-        string baseVersion = param["contentVersion"]!.GetValue<string>();
+        var param = JsonNode.Parse(File.ReadAllBytes(paramPath))!.AsObject();
+        string baseVersion = JsonNode.Parse(baseParam)!["contentVersion"]!.GetValue<string>();
         version ??= BumpVersion(baseVersion);
         param["contentVersion"] = version;
         param["originContentVersion"] = baseVersion;
@@ -116,7 +125,8 @@ internal static class MakePatchCommand
             File.WriteAllText(pv, version);
             entries.Remove("/sce_sys/pfs-version.dat");      // changed: written, not reused
         }
-        Console.WriteLine($"  content version {baseVersion} -> {version}");
+        Console.WriteLine($"  content version {baseVersion} -> {version}" +
+                          (changed.ContainsKey("sce_sys/param.json") ? " (target param.json from --changes)" : ""));
 
         // Compaction: base data blocks that no reused file touches are dropped and everything
         // after them moves down by whole blocks, so block contents stay identical (the patch
@@ -150,6 +160,11 @@ internal static class MakePatchCommand
         string appDrm = AppDrmOf(paramPath);
         PatchPassthrough.Configure(basePkg, imageOffset, liveBlocks, entries);
         PatchExtras.Configure(baseParam, baseParam);
+        // Without --full-copy the reused prefix is never written: it stays a hole in the sparse
+        // target and is read from the base, so the build needs about twice the patch's size in
+        // free space, not the package's. The build's own verify would read those holes, so it is
+        // skipped; the finaliser checks every reused block's digest against the base instead.
+        if (!fullCopy) PatchVirtual.Configure(basePkg, imageOffset, liveBlocks);
         try
         {
             string[] build =
@@ -158,6 +173,7 @@ internal static class MakePatchCommand
                 "--no-coalescing", "--no-relocation-align", "--no-playgo-fix", "--retain-sce-sys",
                 "--no-media-repair", "--no-localised-icons", "--keep-right-sprx", "--encrypt-license-entries",
                 "--app-drm", appDrm,
+                .. (fullCopy ? Array.Empty<string>() : ["--no-verify"]),
                 .. extra,
             ];
             Console.WriteLine("  fpkg " + string.Join(' ', build.Skip(1)));
@@ -170,20 +186,26 @@ internal static class MakePatchCommand
             Console.WriteLine($"make-patch: {PatchPassthrough.AppliedCount} file(s) reused from the base");
 
             string target = Directory.GetFiles(outDir, "*.pkg").Single();
-            var r = PatchFinalize.Finalize(target, basePkg, liveBlocks);
+            var r = PatchFinalize.Finalize(target, basePkg, liveBlocks, created);
             Console.WriteLine($"make-patch: target {r.TargetBlocks:N0} blocks, {r.Reused:N0} from the base, " +
                               $"{r.NewBlocks:N0} new ({r.NewBlocks * 65536L:N0} bytes)");
             if (lih is not null)
             {
                 PatchFinalize.WriteLih(target, r.Origin, lih);
                 Console.WriteLine($"make-patch: wrote {lih} ({new System.IO.FileInfo(lih).Length:N0} bytes)");
+                // Without --full-copy the target is a sparse file with the reused prefix missing:
+                // not a usable package on its own, so it goes once the LIH exists.
+                if (!keep && !fullCopy) { File.Delete(target); Console.WriteLine($"make-patch: removed working target {target}"); }
             }
             return 0;
         }
         finally
         {
+            if (!keep)
+                try { Directory.Delete(staging, recursive: true); } catch (IOException) { }
             PatchPassthrough.Reset();
             PatchExtras.Reset();
+            PatchVirtual.Reset();
         }
     }
 

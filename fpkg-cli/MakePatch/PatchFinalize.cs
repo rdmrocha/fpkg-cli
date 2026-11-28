@@ -52,7 +52,8 @@ internal static class PatchFinalize
     /// <param name="appendStartBlock">First pfs_image.dat block of the region make-patch wrote
     /// fresh (the changed files, after the compacted base data). As in Sony's patches, that region
     /// is shipped whole — every block in it is new — and naps_meta_301/302 describe it.</param>
-    internal static Result Finalize(string targetPath, string basePath, IReadOnlyList<long> liveBlocks)
+    internal static Result Finalize(string targetPath, string basePath, IReadOnlyList<long> liveBlocks,
+                                    string? creationDate = null)
     {
         long appendStartBlock = liveBlocks.Count;
         var b = Read(basePath);
@@ -138,7 +139,7 @@ internal static class PatchFinalize
         table[1035].Payload = originRlc[..0x1000];
         table[1036].Payload = originRlc[..0x1000];
         foreach (uint id in new uint[] { 1035, 1036, 8448, 8449 }) table[id].Flags1 = 0;
-        table[8192].Payload = PatchParam(table[8192].Payload, b.Payload(8192));
+        table[8192].Payload = PatchParam(table[8192].Payload, b.Payload(8192), creationDate);
         byte[] bGd = b.Payload(128);
         byte[] bContent = bGd.AsSpan(0x20, 32).ToArray();
         byte[] AdjustGd(byte[] gd)
@@ -355,14 +356,15 @@ internal static class PatchFinalize
     /// applications); a patch carries both, as the base's version, and a real creation date.
     /// Re-serialised the builder's way: keys sorted ordinally, indented, relaxed escaping.
     /// </summary>
-    private static byte[] PatchParam(byte[] target, byte[] baseParam)
+    private static byte[] PatchParam(byte[] target, byte[] baseParam, string? creationDate)
     {
         var p = JsonNode.Parse(target)!.AsObject();
         string baseVersion = JsonNode.Parse(baseParam)!["contentVersion"]!.GetValue<string>();
         p["originContentVersion"] = baseVersion;
         p["targetContentVersion"] = baseVersion;
         if (p["pubtools"] is JsonObject pub)
-            pub["creationDate"] = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+            pub["creationDate"] = creationDate ??
+                DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
         static JsonNode? Sort(JsonNode? n) => n switch
         {
             JsonObject o => new JsonObject(o.OrderBy(kv => kv.Key, StringComparer.Ordinal)
